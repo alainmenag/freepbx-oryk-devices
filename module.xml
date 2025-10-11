@@ -1,0 +1,42 @@
+<!-- /var/www/html/admin/modules/oryk_devices/module.xml -->
+<module>
+	<rawname>oryk_devices</rawname>
+	<name>Devices</name>
+	<repo>commercial</repo>
+	<version>1.0.9</version>
+	<dbversion>1.0.9</dbversion>
+	<publisher>Oryk</publisher>
+	<type>setup</type>
+	<class>Oryk_devices</class>
+	<phpclass>Oryk_devices</phpclass>
+	<canuninstall>no</canuninstall>
+	<candisable>no</candisable>
+	<license>AGPLv3</license>
+	<licenselink>http://www.gnu.org/licenses/agpl-3.0.txt</licenselink>
+	<changelog>
+		*1.0.1* New
+	</changelog>
+	<category>Oryk</category>
+	<description>Connect to Devices.</description>
+	<more-info>https://oryk.com/voip/devices</more-info>
+	<location>System Banner</location>
+	<files>
+		<file>functions.inc.php</file>
+	</files>
+	<menuitems>
+		<oryk_devices category="Oryk" order="3">
+			<![CDATA[
+				<i class="fa fa-sitemap"></i>
+				<span>Devices</span>
+			]]>
+		</oryk_devices>
+	</menuitems>
+	<depends>
+		<module>core</module>
+		<module>userman</module>
+	</depends>
+	<supported>
+		<version>16.0</version>
+		<version>17.0</version>
+	</supported>
+</module>
