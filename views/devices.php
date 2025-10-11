@@ -1,11 +1,13 @@
 <div class="container-fluid">
 	<div class="fpbx-container">
-		<div class="display full-border">
-			<form class="fpbx-submit" name="submitSettings" action="config.php?display=oryk_devices"  method="post">
-
-				<h2>Coming soon.</h2>
-
-			</form>
-		</div>
+		<h2>Coming soon.</h2>
 	</div>
 </div>
+
+<script>
+
+	$(document).on('click', '[name="add"]', function() {
+		window.location.search = '?display=oryk_devices&action=view';
+	});
+
+</script>
