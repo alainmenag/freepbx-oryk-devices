@@ -383,6 +383,11 @@ class Oryk_devices extends FreePBX_Helpers implements \BMO
 	//Install method. use this or install.php using both may cause weird behavior
 	public function install()
 	{
+		try {
+			$this->db->exec("ALTER TABLE devices ADD UNIQUE KEY id (id)");
+		} catch (\PDOException $e) {
+		}
+
 		return true;
 	}
 
