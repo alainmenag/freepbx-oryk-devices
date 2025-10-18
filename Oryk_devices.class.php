@@ -20,32 +20,32 @@ class Oryk_devices extends FreePBX_Helpers implements \BMO
 
 	public $types = [
 		'pjsip' => [
-			'title' => 'Extension',
+			'title' => 'Extension/User',
 			'icon' => 'fa-phone',
 			'suffix' => '',
 			'tech' => 'pjsip',
-			'fields' => ['DEVICE_USER', 'HEADER_CREDENTIALS', 'DEVICE_PASSWORD'],
+			'fields' => ['DEVICE_USER', 'HEADER_CREDENTIALS', 'DEVICE_ACCOUNT', 'DEVICE_SECRET'],
 		],
 		'handset' => [
 			'title' => 'Handset',
 			'icon' => 'fa-phone',
 			'suffix' => '001',
 			'tech' => 'pjsip',
-			'fields' => ['DEVICE_USER', 'HEADER_CREDENTIALS', 'DEVICE_PASSWORD', 'DEVICE_LINK', 'DEVICE_MANUFACTURER', 'DEVICE_MODEL'],
+			'fields' => ['DEVICE_USER', 'HEADER_CREDENTIALS', 'DEVICE_ACCOUNT', 'DEVICE_SECRET', 'DEVICE_PORTAL', 'DEVICE_MANUFACTURER', 'DEVICE_MODEL'],
 		],
 		'softphone' => [
 			'title' => 'Softphone',
 			'icon' => 'fa-phone',
 			'suffix' => '002',
 			'tech' => 'pjsip',
-			'fields' => ['DEVICE_USER', 'HEADER_CREDENTIALS', 'DEVICE_PASSWORD'],
+			'fields' => ['DEVICE_USER', 'HEADER_CREDENTIALS', 'DEVICE_ACCOUNT', 'DEVICE_SECRET'],
 		],
 		'rtsp' => [
 			'title' => 'RTSP Feed',
 			'icon' => 'fa-video',
 			'suffix' => '',
 			'tech' => 'rtsp',
-			'fields' => ['HEADER_LOCATION', 'DEVICE_ENDPOINT'],
+			'fields' => ['HEADER_STREAM', 'DEVICE_STREAM_IN', 'DEVICE_STREAM_OUT'],
 		],
 	];
 
@@ -71,6 +71,10 @@ class Oryk_devices extends FreePBX_Helpers implements \BMO
 		],
 		'HEADER_LOCATION' => [
 			'html' => '<h2>Location</h2>',
+			'group' => 'location',
+		],
+		'HEADER_STREAM' => [
+			'html' => '<h2>Stream</h2>',
 			'group' => 'location',
 		],
 		'HEADER_MAKE' => [
@@ -100,42 +104,50 @@ class Oryk_devices extends FreePBX_Helpers implements \BMO
 			'maxLength' => 255,
 			'group' => 'basics',
 		],
-		'DEVICE_USERNAME' => [
-			'type' => 'text',
-			'title' => 'Username',
-			'name' => 'username',
+		'DEVICE_ACCOUNT' => [
+			'type' => 'span',
+			'title' => 'Account',
+			'name' => 'account',
 			'maxLength' => 255,
 			'group' => 'authentication',
+			//'disabled' => true,
 		],
-		'DEVICE_PASSWORD' => [
+		'DEVICE_SECRET' => [
 			'type' => 'password',
-			'title' => 'Password',
-			'name' => 'password',
-			'alias' => 'secret',
+			'title' => 'Secret',
+			'name' => 'secret',
 			'maxLength' => 255,
 			'group' => 'authentication',
 		],
 		'DEVICE_USER' => [
 			'type' => 'text',
-			'title' => 'User/Extension',
+			'title' => 'Extension/User',
 			'example' => '1001',
 			'name' => 'user',
 			'maxLength' => 10,
 			'group' => 'location',
 		],
-		'DEVICE_ENDPOINT' => [
+		'DEVICE_STREAM_IN' => [
 			'type' => 'text',
-			'title' => 'Endpoint',
+			'title' => 'In',
 			'example' => 'rtsp://',
-			'name' => 'endpoint',
+			'name' => 'stream_in',
 			'maxLength' => 255,
 			'group' => 'location',
 		],
-		'DEVICE_LINK' => [
+		'DEVICE_STREAM_OUT' => [
+			'type' => 'text',
+			'title' => 'Out',
+			'example' => 'rtmp://',
+			'name' => 'stream_out',
+			'maxLength' => 255,
+			'group' => 'location',
+		],
+		'DEVICE_PORTAL' => [
 			'type' => 'url',
-			'title' => 'Link',
+			'title' => 'Portal',
 			'example' => 'http(s)://',
-			'name' => 'link',
+			'name' => 'portal',
 			'maxLength' => 255,
 			'group' => 'location',
 		],
@@ -312,7 +324,7 @@ class Oryk_devices extends FreePBX_Helpers implements \BMO
 		$generated['account']['value'] = "$uid";
 		$generated['dial']['value'] = "$dial/$uid";
 		$generated['mailbox']['value'] = "$uid@device";
-		
+
 		if (isset($generated['emergency_cid']['value']) && empty($generated['emergency_cid']['value'])) {
 			$generated['emergency_cid']['value'] = $uid;
 		}
@@ -343,7 +355,7 @@ class Oryk_devices extends FreePBX_Helpers implements \BMO
 
 		$match = \FreePBX::Core()->getDevice($id);
 		$device = isset($match['id']) ? $match : null;
-		$type = $this->types[$device['tech'] ?? ''] ?? null;
+		$type = $this->types[$device['kind'] ?? $device['tech'] ?? ''] ?? null;
 		$keys = array_merge(
 			[
 				'DEVICE_ID',
@@ -385,6 +397,10 @@ class Oryk_devices extends FreePBX_Helpers implements \BMO
 	{
 		try {
 			$this->db->exec("ALTER TABLE devices ADD UNIQUE KEY id (id)");
+		} catch (\PDOException $e) {
+		}
+		try {
+			$this->db->exec("ALTER TABLE devices ADD KEY user (user)");
 		} catch (\PDOException $e) {
 		}
 
@@ -429,21 +445,21 @@ class Oryk_devices extends FreePBX_Helpers implements \BMO
 				$limit = $_REQUEST['limit'] ?? 10;
 				$offset = $_REQUEST['offset'] ?? 0;
 				$search = $_REQUEST['search'] ?? '';
-				$sort = $_REQUEST['sort'] ?? 'id';
+				$sort = $_REQUEST['sort'] ?? 'user';
 				$order = $_REQUEST['order'] ?? 'asc';
 
 				$params = [];
 				$where = '';
 
 				if ($search) {
-					$where = "WHERE description LIKE :search OR id LIKE :search OR user LIKE :search";
+					$where = "WHERE d.id LIKE :search OR d.user LIKE :search OR d.description LIKE :search";
 					$params[':search'] = "%$search%";
 				}
 
 				// Count both tables
 				$countSql = "
 					SELECT COUNT(*) 
-					FROM devices
+					FROM devices d
 					$where
 				";
 				$countStmt = $this->db->prepare($countSql);
@@ -451,17 +467,37 @@ class Oryk_devices extends FreePBX_Helpers implements \BMO
 				$total = (int) $countStmt->fetchColumn();
 
 				// Combine FreePBX and Oryk devices
+				// $sql = "
+				// SELECT 
+				// d.id,
+				// d.description,
+				// d.user,
+				// d.tech,
+				// COALESCE(k.data, d.tech) AS kind,
+				// CONCAT('{', GROUP_CONCAT(CONCAT('\"', s.keyword, '\":\"', s.data, '\"')), '}') AS settings
+				// FROM devices d
+				// LEFT JOIN asterisk.sip k 
+				// ON k.id = d.id 
+				// AND k.keyword = 'kind'
+				// LEFT JOIN asterisk.sip s 
+				// ON s.id = d.id
+				// /** search filter */
+				// $where
+				// GROUP BY d.id
+				// ORDER BY $sort $order
+				// LIMIT :limit OFFSET :offset;
+				// ";
 				$sql = "
 					SELECT 
-						d.id,
-						d.description,
-						d.user,
-						COALESCE(s.data, d.tech) AS kind
+					d.id,
+					d.description,
+					d.user,
+					MAX(CASE WHEN s.keyword = 'portal'   THEN s.data END) AS portal,
+					COALESCE(MAX(CASE WHEN s.keyword = 'kind' THEN s.data END), d.tech) AS kind
 					FROM devices d
-					LEFT JOIN asterisk.sip s 
-						ON s.id = d.id 
-						AND s.keyword = 'kind'
+					LEFT JOIN asterisk.sip s ON s.id = d.id
 					$where
+					GROUP BY d.id
 					ORDER BY $sort $order
 					LIMIT :limit OFFSET :offset;
 				";
@@ -474,6 +510,12 @@ class Oryk_devices extends FreePBX_Helpers implements \BMO
 				$stmt->execute();
 
 				$rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+				// Loop through rows to decode settings JSON
+				// foreach ($rows as &$row) {
+				// 	$settingsJson = $row['settings'] ?? '{}';
+				// 	$row['settings'] = json_decode($settingsJson, true) ?: [];
+				// }
 
 				return [
 					'total' => $total,

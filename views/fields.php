@@ -73,6 +73,8 @@
 							/>
 							<label for="<?php echo $key; ?>false">No</label>
 						</div>
+					<?php elseif ($type === 'span'): ?>
+						<span class="no-scroll"><?php echo ($set['value'] ?? ''); ?></span>
 					<?php elseif ($type === 'link'): ?>
 						<a href="<?php echo ($set['default'] ?? ''); ?>" target="_blank" class="btn btn-default">Manage</a>
 					<?php elseif ($type === 'select'): ?>
