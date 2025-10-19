@@ -15,12 +15,13 @@
 		return value ? `<a href="?display=extensions&extdisplay=${value}">${value}</a>` : '-';
 	}
 
-	function formatActions(value, row) {
+	function formatActions(value, row, index, heading) {
+		const type = types[row.kind] || {};
 		return [
 			`<div class="flex gap-3">`,
 			`<a class="btn btn-primary btn-sm" href="?display=oryk_devices&action=view&id=${row.id}" role="button">Edit</a>`,
+			type?.actions?.restart ? `<button class="btn btn-primary btn-sm fa fa-refresh" name="restart" value="${row.id}"></button>` : '',
 			row.link ? `<a class="btn btn-secondary btn-sm" href="${row.link}" target="${row.target}" role="button">Link</a>` : '',
-			row.portal ? `<a class="btn btn-secondary btn-sm" href="${row.portal}" target="${row.target}" role="button">Portal</a>` : '',
 			`</div>`
 		].join('');
 	}
@@ -37,6 +38,12 @@
 		$('#device_table').bootstrapTable('refresh');
 	});
 
+	$(document).on('click', '[name="restart"]', function () {
+		const req = $.post('ajax.php?module=oryk_devices&command=restart', { id: $(this).val() });
+
+		notie.alert(4, "Restarted.", 3);
+	});
+
 </script>
 
 <div class="container-fluid">
@@ -45,7 +52,7 @@
 		<table
 			id="device_table"
 			data-toggle="table"
-			data-url="ajax.php?module=oryk_devices&command=getDevices"
+			data-url="ajax.php?module=oryk_devices&command=list"
 			class="table table-striped" data-side-pagination="server" data-pagination="true" data-search="true"
 			data-sort-name="user"
 			data-sort-order="asc">

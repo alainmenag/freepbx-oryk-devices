@@ -31,7 +31,7 @@ class Oryk_devices extends FreePBX_Helpers implements \BMO
 			'icon' => 'fa-phone',
 			'suffix' => '001',
 			'tech' => 'pjsip',
-			'fields' => ['DEVICE_USER', 'HEADER_CREDENTIALS', 'DEVICE_ACCOUNT', 'DEVICE_SECRET', 'DEVICE_PORTAL', 'DEVICE_MANUFACTURER', 'DEVICE_MODEL'],
+			'fields' => ['DEVICE_USER', 'HEADER_CREDENTIALS', 'DEVICE_ACCOUNT', 'DEVICE_SECRET', 'DEVICE_LINK', 'DEVICE_MANUFACTURER', 'DEVICE_MODEL'],
 		],
 		'softphone' => [
 			'title' => 'Softphone',
@@ -45,7 +45,13 @@ class Oryk_devices extends FreePBX_Helpers implements \BMO
 			'icon' => 'fa-video',
 			'suffix' => '',
 			'tech' => 'rtsp',
-			'fields' => ['HEADER_STREAM', 'DEVICE_STREAM_IN', 'DEVICE_STREAM_OUT'],
+			'fields' => ['HEADER_STREAM', 'DEVICE_STREAM_IN', 'DEVICE_STREAM_OUT', 'DEVICE_LINK'],
+			'actions' => [
+				'restart' => [
+					'title' => 'Restart',
+					'icon' => 'fa-redo',
+				],
+			]
 		],
 	];
 
@@ -143,11 +149,11 @@ class Oryk_devices extends FreePBX_Helpers implements \BMO
 			'maxLength' => 255,
 			'group' => 'location',
 		],
-		'DEVICE_PORTAL' => [
+		'DEVICE_LINK' => [
 			'type' => 'url',
-			'title' => 'Portal',
+			'title' => 'Link',
 			'example' => 'http(s)://',
-			'name' => 'portal',
+			'name' => 'link',
 			'maxLength' => 255,
 			'group' => 'location',
 		],
@@ -431,7 +437,9 @@ class Oryk_devices extends FreePBX_Helpers implements \BMO
 	{
 		// tell FreePBX you handle AJAX requests
 		switch ($req) {
-			case 'getDevices':
+			case 'list':
+				return true;
+			case 'restart':
 				return true;
 			default:
 				return false;
@@ -441,7 +449,16 @@ class Oryk_devices extends FreePBX_Helpers implements \BMO
 	public function ajaxHandler()
 	{
 		switch ($_REQUEST['command']) {
-			case 'getDevices':
+			case 'restart':
+
+				$restart = \FreePBX::Core()->getDriver('rtsp')->restart(
+					$_REQUEST['id'] ?? null,
+				);
+
+				return;
+
+			case 'list':
+
 				$limit = $_REQUEST['limit'] ?? 10;
 				$offset = $_REQUEST['offset'] ?? 0;
 				$search = $_REQUEST['search'] ?? '';
@@ -492,7 +509,7 @@ class Oryk_devices extends FreePBX_Helpers implements \BMO
 					d.id,
 					d.description,
 					d.user,
-					MAX(CASE WHEN s.keyword = 'portal'   THEN s.data END) AS portal,
+					MAX(CASE WHEN s.keyword = 'link'   THEN s.data END) AS link,
 					COALESCE(MAX(CASE WHEN s.keyword = 'kind' THEN s.data END), d.tech) AS kind
 					FROM devices d
 					LEFT JOIN asterisk.sip s ON s.id = d.id
