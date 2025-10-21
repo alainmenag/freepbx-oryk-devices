@@ -21,7 +21,7 @@
 			`<div class="flex gap-3">`,
 			`<a class="btn btn-primary btn-sm" href="?display=oryk_devices&action=view&id=${row.id}" role="button">Edit</a>`,
 			type?.actions?.restart ? `<button class="btn btn-primary btn-sm fa fa-refresh" name="restart" value="${row.id}"></button>` : '',
-			row.link ? `<a class="btn btn-secondary btn-sm" href="${row.link}" target="${row.target}" role="button">Link</a>` : '',
+			row.link ? `<a class="btn btn-secondary btn-sm" href="${row.link}" target="${row.target || '_blank'}" role="button">Link</a>` : '',
 			`</div>`
 		].join('');
 	}

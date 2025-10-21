@@ -45,7 +45,7 @@ class Oryk_devices extends FreePBX_Helpers implements \BMO
 			'icon' => 'fa-video',
 			'suffix' => '',
 			'tech' => 'rtsp',
-			'fields' => ['HEADER_STREAM', 'DEVICE_STREAM_IN', 'DEVICE_STREAM_OUT', 'DEVICE_LINK'],
+			'fields' => ['HEADER_STREAM', 'DEVICE_STREAM_IN'],
 			'actions' => [
 				'restart' => [
 					'title' => 'Restart',
@@ -345,7 +345,7 @@ class Oryk_devices extends FreePBX_Helpers implements \BMO
 		$ret = \FreePBX::Core()->addDevice($uid, $tech, $generated, true);
 
 		//update the associated endpoint configuration
-		if ($ret) {
+		if ($ret && $tech === 'pjsip') {
 			\FreePBX::Core()->processEPM($uid, $tech, true);
 			needreload();
 		}
