@@ -226,6 +226,13 @@ class Oryk_devices extends FreePBX_Helpers implements \BMO
 	 *
 	 * @throws \Exception If no FreePBX instance is provided.
 	 */
+	/**
+	 * Columns of each CDR table, as they were read this request.
+	 *
+	 * @var array<string, array<int, string>>
+	 */
+	private $cdrColumns = [];
+
 	public function __construct($freepbx = null)
 	{
 		if ($freepbx == null) {
@@ -920,31 +927,8 @@ class Oryk_devices extends FreePBX_Helpers implements \BMO
 
 		$rows = 0;
 
-		// The main table is named in Advanced Settings, and the name the CDR
-		// module reports is the one it is currently reading, which on a system
-		// running the CDR trigger is the transient copy rather than the
-		// configured table. Both are asked for, and the defaults kept alongside.
-		$configured = [];
-
-		try {
-			$configured[] = (string) \FreePBX::Config()->get('CDRDBTABLENAME');
-			$configured[] = (string) \FreePBX::Cdr()->getDbTable();
-		} catch (\Exception $e) {
-			// whatever could not be read is covered by the defaults below
-		}
-
-		$tables = array_unique(array_filter(array_merge(
-			$configured,
-			['cdr', 'transient_cdr', 'replicate_cdr']
-		)));
-
-		// A site running the CDR trigger keeps a second, recent copy of the
-		// same rows for the phone call log, and that trigger only fires on
-		// insert, so each copy has to be rewritten in its own right
-		foreach ($tables as $table) {
-			if ($this->cdrTableExists($cdrdb, $table)) {
-				$rows += $this->migrateCdrTable($cdrdb, $table, $old, $new);
-			}
+		foreach ($this->cdrTables($cdrdb) as $table) {
+			$rows += $this->migrateCdrTable($cdrdb, $table, $old, $new);
 		}
 
 		// Channel event logging, when the site records it
@@ -1008,12 +992,18 @@ class Oryk_devices extends FreePBX_Helpers implements \BMO
 		}
 
 		// dst also carries the voicemail pseudo extensions that Core adds to
-		// the dialplan, and the star code that dials a mailbox
-		foreach (['vmu', 'vmb', 'vms', 'vmi', '*'] as $prefix) {
+		// the dialplan, and the prefix that dials a mailbox directly
+		$to = $this->voicemailNumbers($new);
+
+		foreach ($this->voicemailNumbers($old) as $index => $dialled) {
+			if (!isset($to[$index])) {
+				continue;
+			}
+
 			$rows += $this->runCdrUpdate(
 				$cdrdb,
 				'UPDATE ' . $t . ' SET dst = :new WHERE dst = :old',
-				[':old' => $prefix . $old, ':new' => $prefix . $new]
+				[':old' => $dialled, ':new' => $to[$index]]
 			);
 		}
 
@@ -1060,11 +1050,17 @@ class Oryk_devices extends FreePBX_Helpers implements \BMO
 			);
 		}
 
-		foreach (['vmu', 'vmb', 'vms', 'vmi', '*'] as $prefix) {
+		$to = $this->voicemailNumbers($new);
+
+		foreach ($this->voicemailNumbers($old) as $index => $dialled) {
+			if (!isset($to[$index])) {
+				continue;
+			}
+
 			$rows += $this->runCdrUpdate(
 				$cdrdb,
 				'UPDATE ' . $t . ' SET exten = :new WHERE exten = :old',
-				[':old' => $prefix . $old, ':new' => $prefix . $new]
+				[':old' => $dialled, ':new' => $to[$index]]
 			);
 		}
 
@@ -1073,6 +1069,625 @@ class Oryk_devices extends FreePBX_Helpers implements \BMO
 		}
 
 		return $rows;
+	}
+
+	/**
+	 * Take an extension's call history out of the CDR database.
+	 *
+	 * A deleted Extension/User leaves its records behind, because nothing in
+	 * FreePBX removes them: the CDR module subscribes to no core hook and
+	 * call detail records outlive the extension that made them. Left alone
+	 * they are a set of records belonging to somebody who no longer exists,
+	 * and they come back into view the moment the number is reissued.
+	 *
+	 * What goes is worked out from the call detail records and applied to
+	 * both tables. The records naming the extension are found first, and the
+	 * call identifiers on them -- the identifier of the record itself, and
+	 * the identifier of the chain it belongs to -- are what everything else
+	 * is deleted by. A call is more than one row in both tables: the sample
+	 * of a plain extension-to-extension call has one call detail record and
+	 * fifteen events across two channels, and only one of those two channels
+	 * carries the record's own identifier. Deleting by the chain is what
+	 * takes the other one with it.
+	 *
+	 * A call between two extensions belongs to both of them, and one of the
+	 * two may still be in service. It is removed all the same: the point of
+	 * this is that the deleted extension leaves nothing behind, and half a
+	 * call naming only the surviving party would be a record of a call with
+	 * nobody. The surviving extension loses those calls from its own history
+	 * as a consequence, and there is no undo.
+	 *
+	 * @param int|string $extension Number being deleted.
+	 *
+	 * @return array{rows: int, recordings: int} What was removed.
+	 */
+	public function purgeCdr($extension)
+	{
+		$removed = ['rows' => 0, 'recordings' => 0];
+		$extension = trim((string) $extension);
+
+		// The match below is a set of ORs against columns that are empty on
+		// plenty of rows, so an extension that is not a number would not
+		// select this extension's history: it would select the whole table.
+		// The length allows for extensions Core made as well as this module's.
+		if (!preg_match('/^[0-9]{1,20}$/', $extension)) {
+			freepbx_log(FPBX_LOG_ERROR, 'oryk_devices: refusing to purge the call history for "' . $extension . '", which is not a number');
+
+			return $removed;
+		}
+
+		if (!$this->FreePBX->Modules->checkStatus('cdr')) {
+			return $removed;
+		}
+
+		try {
+			$cdrdb = \FreePBX::Cdr()->getCdrDbHandle();
+		} catch (\Exception $e) {
+			freepbx_log(FPBX_LOG_ERROR, 'oryk_devices: no CDR database to purge ' . $extension . ' from: ' . $e->getMessage());
+
+			return $removed;
+		}
+
+		// None of the matched columns is indexed, so on a system with a long
+		// history this reads the table end to end
+		if (function_exists('set_time_limit')) {
+			@set_time_limit(0);
+		}
+
+		$tables = $this->cdrTables($cdrdb);
+		$complete = true;
+
+		// Which calls the extension was part of
+		$calls = $this->findCalls($cdrdb, $tables, $extension);
+
+		if (!$calls) {
+			freepbx_log(FPBX_LOG_INFO, 'oryk_devices: no call history found for ' . $extension);
+
+			return $removed;
+		}
+
+		// What those calls recorded, read before the records naming it go,
+		// because a call detail record is the only index into its audio
+		$recordings = $this->findRecordings($cdrdb, $tables, $calls);
+
+		// The events first, then the records. A record whose events have
+		// gone is still a record; an event whose record has gone is not
+		// reachable by anything, so this is the order that fails better.
+		if ($this->cdrTableExists($cdrdb, 'cel')) {
+			$removed['rows'] += $this->deleteCalls($cdrdb, 'cel', $calls, $complete);
+		}
+
+		foreach ($tables as $table) {
+			$removed['rows'] += $this->deleteCalls($cdrdb, $table, $calls, $complete);
+		}
+
+		// The audio goes last, and only once the records that named it are
+		// actually gone. A deletion that failed leaves records still
+		// standing, and those records still need something to play.
+		if ($complete) {
+			foreach ($recordings as $file => $ignored) {
+				if ($this->recordingIsOrphaned($cdrdb, $tables, $file) && $this->deleteRecording($file)) {
+					$removed['recordings']++;
+				}
+			}
+		} else {
+			freepbx_log(FPBX_LOG_ERROR, 'oryk_devices: the call history for ' . $extension . ' was not fully removed, so its recordings have been left on disk');
+		}
+
+		freepbx_log(FPBX_LOG_INFO, 'oryk_devices: removed ' . $removed['rows'] . ' call history rows and ' . $removed['recordings'] . ' recordings across ' . count($calls) . ' calls for ' . $extension);
+
+		return $removed;
+	}
+
+	/**
+	 * Find the calls an extension was part of.
+	 *
+	 * Both identifiers are collected from every matching record: the
+	 * identifier of the record itself, and the identifier of the chain it
+	 * belongs to. The second is what reaches the other channels of the same
+	 * call, which carry an identifier of their own and would otherwise be
+	 * left behind.
+	 *
+	 * @param object             $cdrdb     CDR database handle.
+	 * @param array<int, string> $tables    Call detail tables to look in.
+	 * @param int|string         $extension Number to find.
+	 *
+	 * @return array<string, bool> Call identifiers, as keys.
+	 */
+	private function findCalls($cdrdb, $tables, $extension)
+	{
+		$calls = [];
+
+		foreach ($tables as $table) {
+			$columns = $this->tableColumns($cdrdb, $table);
+			$match = $this->cdrMatchClause($extension, $columns);
+			$wanted = array_values(array_intersect(['uniqueid', 'linkedid'], $columns));
+
+			if ($match === null || !$wanted) {
+				continue; // nothing to match on, or nothing to collect
+			}
+
+			try {
+				$sth = $cdrdb->prepare(
+					'SELECT ' . implode(', ', array_map(function ($column) {
+						return '`' . $column . '`';
+					}, $wanted)) . ' FROM `' . $table . '` WHERE ' . $match['sql']
+				);
+				$sth->execute($match['params']);
+
+				while ($row = $sth->fetch(PDO::FETCH_ASSOC)) {
+					foreach ($wanted as $column) {
+						if (!empty($row[$column])) {
+							$calls[$row[$column]] = true;
+						}
+					}
+				}
+			} catch (\Exception $e) {
+				freepbx_log(FPBX_LOG_WARNING, 'oryk_devices: unable to read ' . $table . ' for ' . $extension . ': ' . $e->getMessage());
+			}
+		}
+
+		return $calls;
+	}
+
+	/**
+	 * Find the recordings a set of calls made.
+	 *
+	 * @param object                $cdrdb  CDR database handle.
+	 * @param array<int, string>    $tables Call detail tables to look in.
+	 * @param array<string, bool>   $calls  Call identifiers, as keys.
+	 *
+	 * @return array<string, bool> Recording file names, as keys.
+	 */
+	private function findRecordings($cdrdb, $tables, $calls)
+	{
+		$recordings = [];
+
+		foreach ($tables as $table) {
+			$columns = $this->tableColumns($cdrdb, $table);
+
+			if (!in_array('recordingfile', $columns, true)) {
+				continue; // this table never names a recording
+			}
+
+			foreach ($this->callBatches($calls, $columns) as $batch) {
+				try {
+					$sth = $cdrdb->prepare(
+						'SELECT DISTINCT recordingfile FROM `' . $table . '`'
+							. ' WHERE (' . $batch['sql'] . ") AND recordingfile <> ''"
+					);
+					$sth->execute($batch['params']);
+
+					while (($file = $sth->fetchColumn()) !== false) {
+						if ((string) $file !== '') {
+							$recordings[$file] = true;
+						}
+					}
+				} catch (\Exception $e) {
+					freepbx_log(FPBX_LOG_WARNING, 'oryk_devices: unable to read recordings from ' . $table . ': ' . $e->getMessage());
+				}
+			}
+		}
+
+		return $recordings;
+	}
+
+	/**
+	 * Delete every row belonging to a set of calls.
+	 *
+	 * Used for the events and for the records alike: both tables carry the
+	 * same two identifiers, so both are cleared the same way.
+	 *
+	 * @param object              $cdrdb    CDR database handle.
+	 * @param string              $table    Table to clear.
+	 * @param array<string, bool> $calls    Call identifiers, as keys.
+	 * @param bool                $complete Set to false when a delete fails.
+	 *
+	 * @return int How many rows were removed.
+	 */
+	private function deleteCalls($cdrdb, $table, $calls, &$complete)
+	{
+		$columns = $this->tableColumns($cdrdb, $table);
+		$rows = 0;
+
+		foreach ($this->callBatches($calls, $columns) as $batch) {
+			$rows += $this->runCdrUpdate(
+				$cdrdb,
+				'DELETE FROM `' . $table . '` WHERE ' . $batch['sql'],
+				$batch['params'],
+				$failed
+			);
+
+			if ($failed) {
+				$complete = false;
+			}
+		}
+
+		return $rows;
+	}
+
+	/**
+	 * Break a set of calls into conditions a statement can carry.
+	 *
+	 * A busy extension is a great many calls, and one statement naming all
+	 * of them at once is a statement no database will take, so they are
+	 * handed out in batches.
+	 *
+	 * @param array<string, bool> $calls   Call identifiers, as keys.
+	 * @param array<int, string>  $columns Columns the table has.
+	 *
+	 * @return array<int, array{sql: string, params: array<string, string>}>
+	 *         One condition per batch, empty when there is nothing to match.
+	 */
+	private function callBatches($calls, $columns)
+	{
+		$keys = array_values(array_intersect(['uniqueid', 'linkedid'], $columns));
+
+		if (!$calls || !$keys) {
+			return [];
+		}
+
+		$batches = [];
+
+		foreach (array_chunk(array_keys($calls), 250) as $batch) {
+			$holders = [];
+			$params = [];
+
+			foreach ($batch as $index => $call) {
+				$holders[] = ':c' . $index;
+				$params[':c' . $index] = $call;
+			}
+
+			$in = ' IN (' . implode(', ', $holders) . ')';
+			$clauses = [];
+
+			foreach ($keys as $key) {
+				$clauses[] = '`' . $key . '`' . $in;
+			}
+
+			$batches[] = ['sql' => '(' . implode(' OR ', $clauses) . ')', 'params' => $params];
+		}
+
+		return $batches;
+	}
+
+	/**
+	 * List the call detail tables this system keeps.
+	 *
+	 * The main table is named in Advanced Settings, and the name the CDR
+	 * module reports is the one it is currently reading, which on a system
+	 * running the CDR trigger is the transient copy rather than the
+	 * configured table. Both are asked for, and the defaults kept alongside.
+	 *
+	 * The transient copy exists because the trigger behind it only fires on
+	 * insert, so it is a second set of the same rows that nothing else
+	 * maintains and every one of them has to be handled in its own right.
+	 *
+	 * @param object $cdrdb CDR database handle.
+	 *
+	 * @return array<int, string> Tables that are actually there.
+	 */
+	private function cdrTables($cdrdb)
+	{
+		$configured = [];
+
+		try {
+			$configured[] = (string) \FreePBX::Config()->get('CDRDBTABLENAME');
+			$configured[] = (string) \FreePBX::Cdr()->getDbTable();
+		} catch (\Exception $e) {
+			// whatever could not be read is covered by the defaults below
+		}
+
+		$tables = array_unique(array_filter(array_merge(
+			$configured,
+			['cdr', 'transient_cdr', 'replicate_cdr']
+		)));
+
+		return array_values(array_filter($tables, function ($table) use ($cdrdb) {
+			return $this->cdrTableExists($cdrdb, $table);
+		}));
+	}
+
+	/**
+	 * List the columns a table actually has.
+	 *
+	 * Which columns are present varies with the FreePBX version and with the
+	 * optional modules a site has installed. A statement naming a column
+	 * that is not there fails as a whole, and unlike the rewrites -- which
+	 * run one column at a time and can afford to lose one -- a match clause
+	 * is a single condition, so it is built from what is really there.
+	 *
+	 * @param object $cdrdb CDR database handle.
+	 * @param string $table Table to describe.
+	 *
+	 * @return array<int, string> Column names.
+	 */
+	private function tableColumns($cdrdb, $table)
+	{
+		// Asked once per table and kept, because the recording check asks for
+		// the same answer once per recording
+		if (isset($this->cdrColumns[$table])) {
+			return $this->cdrColumns[$table];
+		}
+
+		try {
+			$sth = $cdrdb->prepare('SHOW COLUMNS FROM `' . $table . '`');
+			$sth->execute();
+
+			$this->cdrColumns[$table] = $sth->fetchAll(PDO::FETCH_COLUMN);
+		} catch (\Exception $e) {
+			return [];
+		}
+
+		return $this->cdrColumns[$table];
+	}
+
+	/**
+	 * Build the condition that finds an extension in a call detail record.
+	 *
+	 * Two columns, matched exactly: the two ends of the call. Nothing else a
+	 * record holds is matched on directly, and the reason is that a false
+	 * match here is not one row. Each record found contributes the call it
+	 * is and the chain it belongs to, and everything carrying either is
+	 * deleted from both tables -- so a caller id name that happens to read
+	 * as this number, or an account code a site uses for a tenant, would
+	 * take whole calls belonging to somebody else with it.
+	 *
+	 * The rest of a call is reached through those identifiers rather than by
+	 * matching, which is what makes two columns enough: the other channels
+	 * of the same call carry identifiers of their own and are found through
+	 * the chain, not through the number.
+	 *
+	 * @param int|string         $extension Number to find.
+	 * @param array<int, string> $columns   Columns the table has.
+	 *
+	 * @return array{sql: string, params: array<string, mixed>}|null
+	 *         The condition, or null when the table holds neither of them.
+	 */
+	private function cdrMatchClause($extension, $columns)
+	{
+		$clauses = [];
+		$params = [];
+
+		foreach (['src', 'dst'] as $column) {
+			if (!in_array($column, $columns, true)) {
+				continue;
+			}
+
+			$key = ':m' . count($params);
+			$params[$key] = $extension;
+			$clauses[] = '`' . $column . '` = ' . $key;
+		}
+
+		if (!$clauses) {
+			return null;
+		}
+
+		return ['sql' => '(' . implode(' OR ', $clauses) . ')', 'params' => $params];
+	}
+
+	/**
+	 * The numbers that reach an extension's mailbox rather than the extension.
+	 *
+	 * Core adds a set of pseudo extensions to the dialplan for a mailbox, and
+	 * a prefix dials one directly. The prefix is a feature code and the
+	 * feature codes are themselves that prefix and two digits, so on a two
+	 * digit extension it collides with them: taking *98 for extension 98
+	 * would be taking everybody's voicemail. Short extensions therefore get
+	 * the pseudo extensions and nothing else.
+	 *
+	 * The four pseudo extensions come first, always, in a fixed order, and
+	 * the prefixed number last. Callers rewriting one number into another
+	 * line the two lists up by position, so nothing here may become
+	 * conditional ahead of them.
+	 *
+	 * @param int|string $extension Extension whose mailbox is wanted.
+	 *
+	 * @return array<int, string> Numbers that reach the mailbox.
+	 */
+	private function voicemailNumbers($extension)
+	{
+		$dialled = [];
+
+		foreach (['vmu', 'vmb', 'vms', 'vmi'] as $prefix) {
+			$dialled[] = $prefix . $extension;
+		}
+
+		if (strlen((string) $extension) < 3) {
+			return $dialled;
+		}
+
+		$prefix = $this->directVoicemailPrefix();
+
+		if ($prefix !== '') {
+			$dialled[] = $prefix . $extension;
+		}
+
+		return $dialled;
+	}
+
+	/**
+	 * The prefix that dials a mailbox directly.
+	 *
+	 * This is the voicemail module's own feature code rather than a setting,
+	 * so it is asked for where feature codes live. An administrator can
+	 * change it, and can turn it off, in which case no such numbers were ever
+	 * put in the dialplan and there is nothing of that shape to find.
+	 *
+	 * @return string The prefix, or an empty string when there is none.
+	 */
+	private function directVoicemailPrefix()
+	{
+		try {
+			if (!class_exists('featurecode')) {
+				$this->FreePBX->Modules->loadFunctionsInc('featurecodes');
+			}
+
+			if (!class_exists('featurecode')) {
+				return '*'; // the module's own default
+			}
+
+			// Asked of the feature code itself rather than through the
+			// convenience function, which answers a disabled code with a
+			// human readable complaint rather than with nothing
+			$code = new \featurecode('voicemail', 'directdialvoicemail');
+
+			// Empty when the administrator has turned the code off, in which
+			// case no numbers of that shape were ever put in the dialplan
+			return (string) $code->getCodeActive();
+		} catch (\Throwable $e) {
+			return '*';
+		}
+	}
+
+	/**
+	 * Report whether nothing points at a recording any more.
+	 *
+	 * A recording belongs to a call rather than to one leg of it, and its
+	 * name is written onto every record of that call, so one named by the
+	 * records that have just gone may still be named by a record that stayed.
+	 * Being unable to tell counts as still in use: an orphaned file costs
+	 * disk, and a wrongly deleted one costs the call.
+	 *
+	 * @param object             $cdrdb  CDR database handle.
+	 * @param array<int, string> $tables Call detail tables to look in.
+	 * @param string             $file   Recording file name.
+	 *
+	 * @return bool True when no record names the recording.
+	 */
+	private function recordingIsOrphaned($cdrdb, $tables, $file)
+	{
+		foreach ($tables as $table) {
+			if (!in_array('recordingfile', $this->tableColumns($cdrdb, $table), true)) {
+				continue; // this table never names a recording
+			}
+
+			try {
+				$sth = $cdrdb->prepare('SELECT 1 FROM `' . $table . '` WHERE recordingfile = ? LIMIT 1');
+				$sth->execute([$file]);
+
+				if ($sth->fetchColumn()) {
+					return false;
+				}
+			} catch (\Exception $e) {
+				return false;
+			}
+		}
+
+		return true;
+	}
+
+	/**
+	 * Delete the audio a call recording left on disk.
+	 *
+	 * Recordings are filed by the date in their own name rather than by the
+	 * call, which is how the CDR module finds them to play. The name is
+	 * taken as a name and nothing else -- the path is built here -- so a row
+	 * carrying something unexpected cannot reach outside the recordings
+	 * directory.
+	 *
+	 * @param string $file Recording file name from the call detail record.
+	 *
+	 * @return bool True when a file was deleted.
+	 */
+	private function deleteRecording($file)
+	{
+		$file = basename(trim((string) $file));
+
+		if ($file === '' || $file === '.' || $file === '..') {
+			return false;
+		}
+
+		$parts = explode('-', $file);
+
+		// type-destination-source-YYYYMMDD-HHMMSS-uniqueid.fmt
+		if (!isset($parts[3]) || !preg_match('/^\d{8}/', $parts[3])) {
+			return false;
+		}
+
+		$spool = \FreePBX::Config()->get('ASTSPOOLDIR');
+		$base = rtrim((string) (\FreePBX::Config()->get('MIXMON_DIR') ?: $spool . '/monitor'), '/');
+
+		$path = $base . '/' . substr($parts[3], 0, 4)
+			. '/' . substr($parts[3], 4, 2)
+			. '/' . substr($parts[3], 6, 2)
+			. '/' . $file;
+
+		if (!is_file($path)) {
+			return false;
+		}
+
+		return @unlink($path);
+	}
+
+	/**
+	 * Take an extension out of the settings that decide what an account sees.
+	 *
+	 * An account this module owns goes with the extension, but one belonging
+	 * to a person outlives it with the number still listed among the
+	 * extensions they may open. UCP shows that as an extension that is not
+	 * assigned to them rather than as one that is gone.
+	 *
+	 * @param int|string $extension Number being deleted.
+	 *
+	 * @return int How many settings were changed.
+	 */
+	public function forgetUcpAssignments($extension)
+	{
+		$changed = 0;
+
+		foreach (['userman_users_settings', 'userman_groups_settings'] as $table) {
+			try {
+				$sth = $this->db->prepare(
+					'SELECT DISTINCT val FROM `' . $table . '` WHERE `key` = ? AND module LIKE ?'
+				);
+				$sth->execute(['assigned', 'ucp|%']);
+				$values = $sth->fetchAll(PDO::FETCH_COLUMN);
+			} catch (\Exception $e) {
+				continue; // the table is not there on this install
+			}
+
+			$update = null;
+
+			foreach ($values as $val) {
+				$assigned = json_decode((string) $val, true);
+
+				if (!is_array($assigned)) {
+					continue;
+				}
+
+				$kept = array_values(array_filter($assigned, function ($listed) use ($extension) {
+					return (string) $listed !== (string) $extension;
+				}));
+
+				if (count($kept) === count($assigned)) {
+					continue;
+				}
+
+				try {
+					$update = $update ?: $this->db->prepare(
+						'UPDATE `' . $table . '` SET val = ? WHERE `key` = ? AND module LIKE ? AND val = ?'
+					);
+					$update->execute([json_encode($kept), 'assigned', 'ucp|%', $val]);
+					$changed += $update->rowCount();
+				} catch (\Exception $e) {
+					freepbx_log(FPBX_LOG_ERROR, 'oryk_devices: unable to unassign ' . $extension . ': ' . $e->getMessage());
+				}
+			}
+		}
+
+		// Any web client registered against the extension, whichever module
+		// put it there. The table is absent unless one of them is installed,
+		// which is the common reason this does nothing.
+		try {
+			$sth = $this->db->prepare('DELETE FROM webrtc_clients WHERE `user` = ?');
+			$sth->execute([$extension]);
+			$changed += $sth->rowCount();
+		} catch (\Exception $e) {
+			freepbx_log(FPBX_LOG_WARNING, 'oryk_devices: no web client rows removed for ' . $extension . ': ' . $e->getMessage());
+		}
+
+		return $changed;
 	}
 
 	/**
@@ -1125,20 +1740,29 @@ class Oryk_devices extends FreePBX_Helpers implements \BMO
 	 * naming a column that is not there is logged and stepped over rather
 	 * than being allowed to abandon the rest of the move.
 	 *
+	 * A caller that is deleting rather than rewriting cannot read a return
+	 * of zero as nothing to do, because a statement that failed returns zero
+	 * as well, so it is told which of the two happened.
+	 *
 	 * @param object                $cdrdb  CDR database handle.
 	 * @param string                $sql    Statement to run.
 	 * @param array<string, mixed>  $params Values to bind.
+	 * @param bool|null             $failed Set to whether the statement failed.
 	 *
 	 * @return int How many rows the statement changed.
 	 */
-	private function runCdrUpdate($cdrdb, $sql, $params)
+	private function runCdrUpdate($cdrdb, $sql, $params, &$failed = null)
 	{
+		$failed = false;
+
 		try {
 			$sth = $cdrdb->prepare($sql);
 			$sth->execute($params);
 
 			return $sth->rowCount();
 		} catch (\Exception $e) {
+			$failed = true;
+
 			freepbx_log(FPBX_LOG_WARNING, 'oryk_devices: ' . $sql . ': ' . $e->getMessage());
 
 			return 0;
@@ -1622,10 +2246,26 @@ class Oryk_devices extends FreePBX_Helpers implements \BMO
 		) {
 			$this->removeUsermanUser($user);
 
+			$deleted = true;
+
 			try {
 				\FreePBX::Core()->delUser($user);
 			} catch (\Exception $e) {
+				$deleted = false;
+
 				freepbx_log(FPBX_LOG_ERROR, 'oryk_devices: unable to delete user ' . $user . ': ' . $e->getMessage());
+			}
+
+			// Only once the extension has actually gone. An extension still in
+			// service, left behind because its deletion failed, must not lose
+			// the history and recordings it is still making.
+			if ($deleted) {
+				// An account belonging to a person outlives the extension, so
+				// the number comes out of what that account is allowed to open
+				$this->forgetUcpAssignments($user);
+
+				// The history outlives it too, and nothing in FreePBX clears it
+				$this->purgeCdr($user);
 			}
 		}
 
