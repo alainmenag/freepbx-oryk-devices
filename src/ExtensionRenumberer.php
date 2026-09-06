@@ -29,7 +29,10 @@ namespace FreePBX\Modules\Oryk_Connect;
  *   User Manager is moved after the old extension is gone, so it is not
  *   left unassigning the extension it has just been pointed at;
  *
- *   what an account may open moves before the history it opens.
+ *   what an account may open moves before the history it opens;
+ *
+ *   the custom endpoint settings are given up with the old number, since
+ *   the save this is part of writes them onto the new one.
  *
  * This class owns none of those things. It knows what has to happen to
  * each of them and in what sequence, which is a different job from doing
@@ -73,12 +76,21 @@ class ExtensionRenumberer extends Service
 	private $cdr;
 
 	/**
+	 * The pjsip settings pinned on the endpoint outside what FreePBX
+	 * generates.
+	 *
+	 * @var EndpointSettings
+	 */
+	private $endpoints;
+
+	/**
 	 * @param object            $freepbx    FreePBX application instance.
 	 * @param ExtensionManager  $extensions Core extensions.
 	 * @param VoicemailManager  $voicemail  Mailboxes.
 	 * @param UsermanManager    $userman    User Manager accounts.
 	 * @param UcpAssignments    $ucp        UCP assignments.
 	 * @param CdrHistory        $cdr        Call history.
+	 * @param EndpointSettings  $endpoints  Custom pjsip endpoint settings.
 	 */
 	public function __construct(
 		$freepbx,
@@ -86,7 +98,8 @@ class ExtensionRenumberer extends Service
 		VoicemailManager $voicemail,
 		UsermanManager $userman,
 		UcpAssignments $ucp,
-		CdrHistory $cdr
+		CdrHistory $cdr,
+		EndpointSettings $endpoints
 	) {
 		parent::__construct($freepbx);
 
@@ -95,6 +108,7 @@ class ExtensionRenumberer extends Service
 		$this->userman = $userman;
 		$this->ucp = $ucp;
 		$this->cdr = $cdr;
+		$this->endpoints = $endpoints;
 	}
 
 	/**
@@ -184,6 +198,11 @@ class ExtensionRenumberer extends Service
 		} catch (\Exception $e) {
 			$this->logError('unable to delete device ' . $old . ': ' . $e->getMessage());
 		}
+
+		// The custom endpoint settings go with it. Anything written for this
+		// device rather than for every device follows the number across, and
+		// the save this renumbering is part of writes the rest.
+		$this->endpoints->move($old, $new);
 
 		if ($hadUser) {
 			// Voicemail deletes the mailbox behind Core::delUser(), which is

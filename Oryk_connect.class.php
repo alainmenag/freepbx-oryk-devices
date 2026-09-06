@@ -10,6 +10,7 @@ use FreePBX_Helpers;
 use FreePBX\Modules\Oryk_Connect\CdrHistory;
 use FreePBX\Modules\Oryk_Connect\DeviceManager;
 use FreePBX\Modules\Oryk_Connect\DeviceSchema;
+use FreePBX\Modules\Oryk_Connect\EndpointSettings;
 use FreePBX\Modules\Oryk_Connect\ExtensionManager;
 use FreePBX\Modules\Oryk_Connect\ExtensionRenumberer;
 use FreePBX\Modules\Oryk_Connect\NumberAllocator;
@@ -139,6 +140,13 @@ class Oryk_connect extends FreePBX_Helpers implements \BMO
 	private $schema;
 
 	/**
+	 * The pjsip settings pinned on a device outside what FreePBX generates.
+	 *
+	 * @var EndpointSettings
+	 */
+	private $endpoints;
+
+	/**
 	 * Creating, saving and deleting a device.
 	 *
 	 * @var DeviceManager
@@ -162,7 +170,8 @@ class Oryk_connect extends FreePBX_Helpers implements \BMO
 		$this->db = $freepbx->Database;
 		$this->astman = $freepbx->astman;
 
-		$this->schema = new DeviceSchema($freepbx);
+		$this->endpoints = new EndpointSettings($freepbx);
+		$this->schema = new DeviceSchema($freepbx, $this->endpoints);
 		$this->voicemail = new VoicemailManager($freepbx);
 		$this->cdr = new CdrHistory($freepbx, $this->voicemail);
 		$this->userman = new UsermanManager($freepbx);
@@ -175,7 +184,8 @@ class Oryk_connect extends FreePBX_Helpers implements \BMO
 			$this->voicemail,
 			$this->userman,
 			$this->ucp,
-			$this->cdr
+			$this->cdr,
+			$this->endpoints
 		);
 		$this->devices = new DeviceManager(
 			$freepbx,
@@ -186,7 +196,8 @@ class Oryk_connect extends FreePBX_Helpers implements \BMO
 			$this->userman,
 			$this->voicemail,
 			$this->ucp,
-			$this->cdr
+			$this->cdr,
+			$this->endpoints
 		);
 
 		$this->tryRegisterDriver();
@@ -295,6 +306,10 @@ class Oryk_connect extends FreePBX_Helpers implements \BMO
 	 */
 	public function install()
 	{
+		// The from domain lives in Settings -> Advanced Settings. Registering
+		// it again on an upgrade keeps whatever is already set there.
+		$this->endpoints->register();
+
 		try {
 			$this->db->exec("ALTER TABLE devices ADD UNIQUE KEY id (id)");
 		} catch (\PDOException $e) {
