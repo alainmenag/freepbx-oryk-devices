@@ -24,6 +24,16 @@ class Oryk_devices extends FreePBX_Helpers implements \BMO
 	private $table = 'oryk_devices_settings';
 
 	/**
+	 * Prefix every generated device id starts with.
+	 */
+	const NUMBER_PREFIX = '999';
+
+	/**
+	 * Total length of a generated device id, prefix included.
+	 */
+	const NUMBER_LENGTH = 10;
+
+	/**
 	 * Supported device types and their configuration definitions.
 	 *
 	 * @var array<string, array<string, mixed>>
@@ -304,16 +314,46 @@ class Oryk_devices extends FreePBX_Helpers implements \BMO
 	}
 
 	/**
-	 * Generate a unique numeric device identifier.
+	 * Generate the next sequential device identifier.
 	 *
-	 * @return string Ten-digit device identifier.
+	 * Identifiers are NUMBER_LENGTH digits long and always start with
+	 * NUMBER_PREFIX, so the range runs from 9990000001 to 9999999999. The
+	 * highest identifier already taken by a device or a user is incremented,
+	 * which keeps the numbers sequential and never reuses a freed id.
+	 *
+	 * @return string Device identifier.
+	 *
+	 * @throws \Exception When the identifier range is exhausted.
 	 */
 	public function generateNumber()
 	{
-		$ms = round(microtime(true) * 1000);
-		// use 4 ms digits + 4 random digits + '99' prefix
-		$rand = random_int(1000, 9999); // secure random 4-digit number
-		return '99' . substr($ms, -4) . $rand; // total = 2 + 4 + 4 = 10 digits
+		$digits = self::NUMBER_LENGTH - strlen(self::NUMBER_PREFIX);
+		$floor = (int) (self::NUMBER_PREFIX . str_repeat('0', $digits)); // 9990000000
+		$ceiling = (int) (self::NUMBER_PREFIX . str_repeat('9', $digits)); // 9999999999
+		$pattern = '^' . self::NUMBER_PREFIX . '[0-9]{' . $digits . '}$';
+
+		// Users are included so an extension left behind by a device is not reused.
+		$sql = 'SELECT MAX(CAST(id AS UNSIGNED)) FROM ('
+			. ' SELECT id FROM devices WHERE id REGEXP ?'
+			. ' UNION ALL'
+			. ' SELECT extension AS id FROM users WHERE extension REGEXP ?'
+			. ') AS taken';
+
+		$sth = $this->db->prepare($sql);
+		$sth->execute([$pattern, $pattern]);
+		$highest = (int) $sth->fetchColumn();
+
+		$next = ($highest >= $floor ? $highest : $floor) + 1;
+
+		if ($next > $ceiling) {
+			throw new \Exception(sprintf(
+				'No device id left in the %d-%d range',
+				$floor + 1,
+				$ceiling
+			));
+		}
+
+		return (string) $next;
 	}
 
 	/**
@@ -417,6 +457,178 @@ class Oryk_devices extends FreePBX_Helpers implements \BMO
 	}
 
 	/**
+	 * Keep the user/extension name in step with the device description.
+	 *
+	 * Only the name is touched. Deleting and re-adding the user the way the
+	 * FreePBX extension screen does would reset voicemail, ring timers and
+	 * every other setting this module does not own.
+	 *
+	 * @param int|string $extension Extension/user number.
+	 * @param string     $name      Name to store.
+	 *
+	 * @return bool True when the name was written.
+	 */
+	public function syncUserName($extension, $name)
+	{
+		if (trim((string) $extension) === '' || !$this->hasUser($extension)) {
+			return false;
+		}
+
+		$sth = $this->db->prepare('UPDATE users SET name = ? WHERE extension = ?');
+		$sth->execute([$name, $extension]);
+
+		// The same value addUser() writes: Asterisk reads it for the caller id name
+		if ($this->astman && $this->astman->connected()) {
+			$this->astman->database_put('AMPUSER', $extension . '/cidname', $name);
+		}
+
+		return true;
+	}
+
+	/**
+	 * Make sure a User Manager account exists for the given extension.
+	 *
+	 * This uses the same entry point as the FreePBX extension screen
+	 * (Userman::processQuickCreate), so the account lands in the default
+	 * directory, gets the extension assigned, and picks up the configured
+	 * groups, UCP template and welcome email.
+	 *
+	 * @param int|string  $extension   Extension/user number.
+	 * @param string|null $displayname Display name for a new account.
+	 * @param string      $tech        Device technology.
+	 *
+	 * @return bool True when the account exists after the call.
+	 */
+	public function ensureUsermanUser($extension, $displayname = null, $tech = 'pjsip')
+	{
+		if (!$this->FreePBX->Modules->checkStatus('userman')) {
+			return false;
+		}
+
+		try {
+			$userman = \FreePBX::Userman();
+
+			$existing = $userman->getUserByUsername($extension);
+
+			if (empty($existing['id'])) {
+				$existing = $userman->getUserByDefaultExtension($extension);
+			}
+
+			if (!empty($existing['id'])) {
+				return true;
+			}
+
+			$userman->processQuickCreate($tech, $extension, [
+				'um' => 'yes',
+				'name' => ($displayname === null || $displayname === '') ? (string) $extension : $displayname,
+				'email' => '',
+				'um-groups' => [],
+			]);
+		} catch (\Exception $e) {
+			freepbx_log(FPBX_LOG_ERROR, 'oryk_devices: unable to create userman user ' . $extension . ': ' . $e->getMessage());
+
+			return false;
+		}
+
+		$created = $userman->getUserByUsername($extension);
+
+		return !empty($created['id']);
+	}
+
+	/**
+	 * Keep the User Manager display name in step with the device description.
+	 *
+	 * Only an account whose username matches the extension is touched, and
+	 * only its display name: every field left out of the update is carried
+	 * over by User Manager, so email, groups and the rest survive.
+	 *
+	 * @param int|string $extension   Extension/user number.
+	 * @param string     $displayname Display name to store.
+	 *
+	 * @return bool True when the display name was updated.
+	 */
+	public function syncUsermanUser($extension, $displayname)
+	{
+		if (!$this->FreePBX->Modules->checkStatus('userman')) {
+			return false;
+		}
+
+		try {
+			$userman = \FreePBX::Userman();
+			$user = $userman->getUserByUsername($extension);
+
+			if (empty($user['id'])) {
+				$user = $userman->getUserByDefaultExtension($extension);
+			}
+
+			// Never rename an account a person linked to this extension by hand
+			if (empty($user['id']) || (string) $user['username'] !== (string) $extension) {
+				return false;
+			}
+
+			if ((string) ($user['displayname'] ?? '') === (string) $displayname) {
+				return true;
+			}
+
+			$userman->updateUser(
+				$user['id'],
+				$user['username'],
+				$user['username'],
+				$user['default_extension'] ?? $extension,
+				$user['description'] ?? null,
+				['displayname' => $displayname],
+				null,
+				true
+			);
+		} catch (\Exception $e) {
+			freepbx_log(FPBX_LOG_ERROR, 'oryk_devices: unable to update userman user ' . $extension . ': ' . $e->getMessage());
+
+			return false;
+		}
+
+		return true;
+	}
+
+	/**
+	 * Delete the User Manager account belonging to an extension.
+	 *
+	 * Only an account whose username matches the extension is removed, so an
+	 * account that merely has the extension assigned to it (a real person
+	 * linked by hand) is left alone.
+	 *
+	 * @param int|string $extension Extension/user number.
+	 *
+	 * @return bool True when an account was deleted.
+	 */
+	public function removeUsermanUser($extension)
+	{
+		if (!$this->FreePBX->Modules->checkStatus('userman')) {
+			return false;
+		}
+
+		try {
+			$userman = \FreePBX::Userman();
+			$user = $userman->getUserByUsername($extension);
+
+			if (empty($user['id'])) {
+				$user = $userman->getUserByDefaultExtension($extension);
+			}
+
+			if (empty($user['id']) || (string) $user['username'] !== (string) $extension) {
+				return false;
+			}
+
+			$userman->deleteUserByID($user['id']);
+		} catch (\Exception $e) {
+			freepbx_log(FPBX_LOG_ERROR, 'oryk_devices: unable to delete userman user ' . $extension . ': ' . $e->getMessage());
+
+			return false;
+		}
+
+		return true;
+	}
+
+	/**
 	 * Delete a device and, for kinds that own their user, the matching
 	 * user/extension.
 	 *
@@ -448,6 +660,8 @@ class Oryk_devices extends FreePBX_Helpers implements \BMO
 			&& (string) $user === (string) $device['id']
 			&& !$this->userHasDevices($user)
 		) {
+			$this->removeUsermanUser($user);
+
 			try {
 				\FreePBX::Core()->delUser($user);
 			} catch (\Exception $e) {
@@ -488,7 +702,7 @@ class Oryk_devices extends FreePBX_Helpers implements \BMO
 
 		$description = $_REQUEST['DEVICE_DESCRIPTION'] ?? null;
 
-		$_REQUEST['DEVICE_DESCRIPTION'] = $description ? $description : $gid;
+		$_REQUEST['DEVICE_DESCRIPTION'] = $description ? $description : $uid;
 
 		$generated = \FreePBX::Core()->generateDefaultDeviceSettings(
 			$tech === 'pjsip' ? 'pjsip' : 'custom',
@@ -544,6 +758,11 @@ class Oryk_devices extends FreePBX_Helpers implements \BMO
 		if (!empty($type['creates_user'])) {
 			$generated['user']['value'] = "$uid";
 			$this->ensureUser($uid, $_REQUEST['DEVICE_DESCRIPTION']);
+			$this->ensureUsermanUser($uid, $_REQUEST['DEVICE_DESCRIPTION'], $tech);
+
+			// Keep both names in step with the description on every save
+			$this->syncUserName($uid, $_REQUEST['DEVICE_DESCRIPTION']);
+			$this->syncUsermanUser($uid, $_REQUEST['DEVICE_DESCRIPTION']);
 		}
 
 		// If device exists, delete it first
