@@ -236,8 +236,18 @@ functions.inc.php        FreePBX module hook placeholder
 install.php              Legacy installation entry point
 module.xml               Module metadata and FreePBX dependencies
 
+src/
+  Service.php            What every subsystem below is given: the FreePBX
+                         application, the database, the manager connection
+  VoicemailManager.php   Mailboxes, their aliases, and what dials them
+  UsermanManager.php     The User Manager account behind an Extension/User
+  CdrHistory.php         Moving and removing an extension's call history
+
 drivers/
   Rtsp.class.php         Custom FreePBX Core driver backed by MediaMTX
+
+tests/
+  smoke.php              Standalone checks, no FreePBX required
 
 views/
   devices.php            Searchable device list and row actions
@@ -326,6 +336,30 @@ After changing the module version or installation behavior, update `version` and
 fwconsole ma upgrade oryk_devices
 fwconsole reload
 ```
+
+### Subsystems
+
+Anything under `src/` is loaded by a small autoloader registered at the top
+of `Oryk_devices.class.php`, since BMO autoloads only the module class
+itself. A new class goes in `src/`, in the
+`FreePBX\Modules\Oryk_Devices` namespace, named after its file, and needs
+no registration anywhere.
+
+The RTSP driver is deliberately left out of that loader. It is required
+explicitly, after the Core class it extends has been made sure of, and that
+order is worth keeping visible in the file.
+
+### Smoke test
+
+```bash
+php tests/smoke.php
+```
+
+Runs anywhere, with nothing installed. It checks that the subsystems load
+and build, that a missing FreePBX module is declined rather than thrown,
+and that the call history purge refuses anything that is not a number. It
+is not a substitute for trying a renumber on a real PBX -- it catches the
+kind of mistake refactoring makes, before a deploy does.
 
 ## Known limitations
 
