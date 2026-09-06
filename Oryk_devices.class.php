@@ -46,7 +46,7 @@ class Oryk_devices extends FreePBX_Helpers implements \BMO
 			'tech' => 'pjsip',
 			// The device is the extension: a user with the same id is created and linked.
 			'creates_user' => true,
-			'fields' => ['DEVICE_USER', 'HEADER_CREDENTIALS', 'DEVICE_ACCOUNT', 'DEVICE_SECRET'],
+			'fields' => ['DEVICE_USER', 'DEVICE_EMAIL', 'HEADER_CREDENTIALS', 'DEVICE_ACCOUNT', 'DEVICE_SECRET'],
 		],
 		'handset' => [
 			'title' => 'Handset',
@@ -133,6 +133,15 @@ class Oryk_devices extends FreePBX_Helpers implements \BMO
 			//'required' => true,
 			'maxLength' => 255,
 			'group' => 'basics',
+		],
+		'DEVICE_EMAIL' => [
+			'type' => 'email',
+			'title' => 'Email',
+			'example' => 'user@example.com',
+			'name' => 'email',
+			'maxLength' => 255,
+			'group' => 'basics',
+			'help' => 'Used for the User Manager account and its welcome email.',
 		],
 		'DEVICE_KIND' => [
 			'type' => 'select',
@@ -496,10 +505,11 @@ class Oryk_devices extends FreePBX_Helpers implements \BMO
 	 * @param int|string  $extension   Extension/user number.
 	 * @param string|null $displayname Display name for a new account.
 	 * @param string      $tech        Device technology.
+	 * @param string|null $email       Email address for the account.
 	 *
 	 * @return bool True when the account exists after the call.
 	 */
-	public function ensureUsermanUser($extension, $displayname = null, $tech = 'pjsip')
+	public function ensureUsermanUser($extension, $displayname = null, $tech = 'pjsip', $email = null)
 	{
 		if (!$this->FreePBX->Modules->checkStatus('userman')) {
 			return false;
@@ -521,7 +531,7 @@ class Oryk_devices extends FreePBX_Helpers implements \BMO
 			$userman->processQuickCreate($tech, $extension, [
 				'um' => 'yes',
 				'name' => ($displayname === null || $displayname === '') ? (string) $extension : $displayname,
-				'email' => '',
+				'email' => (string) $email,
 				'um-groups' => [],
 			]);
 		} catch (\Exception $e) {
@@ -542,12 +552,13 @@ class Oryk_devices extends FreePBX_Helpers implements \BMO
 	 * only its display name: every field left out of the update is carried
 	 * over by User Manager, so email, groups and the rest survive.
 	 *
-	 * @param int|string $extension   Extension/user number.
-	 * @param string     $displayname Display name to store.
+	 * @param int|string  $extension   Extension/user number.
+	 * @param string      $displayname Display name to store.
+	 * @param string|null $email       Email to store, null to leave it alone.
 	 *
-	 * @return bool True when the display name was updated.
+	 * @return bool True when the account was updated.
 	 */
-	public function syncUsermanUser($extension, $displayname)
+	public function syncUsermanUser($extension, $displayname, $email = null)
 	{
 		if (!$this->FreePBX->Modules->checkStatus('userman')) {
 			return false;
@@ -566,7 +577,17 @@ class Oryk_devices extends FreePBX_Helpers implements \BMO
 				return false;
 			}
 
-			if ((string) ($user['displayname'] ?? '') === (string) $displayname) {
+			$extraData = ['displayname' => $displayname];
+
+			// A supplied email is written through, including a blank one to clear it
+			if ($email !== null) {
+				$extraData['email'] = $email;
+			}
+
+			$sameName = (string) ($user['displayname'] ?? '') === (string) $displayname;
+			$sameEmail = $email === null || (string) ($user['email'] ?? '') === (string) $email;
+
+			if ($sameName && $sameEmail) {
 				return true;
 			}
 
@@ -576,12 +597,63 @@ class Oryk_devices extends FreePBX_Helpers implements \BMO
 				$user['username'],
 				$user['default_extension'] ?? $extension,
 				$user['description'] ?? null,
-				['displayname' => $displayname],
+				$extraData,
 				null,
 				true
 			);
 		} catch (\Exception $e) {
 			freepbx_log(FPBX_LOG_ERROR, 'oryk_devices: unable to update userman user ' . $extension . ': ' . $e->getMessage());
+
+			return false;
+		}
+
+		return true;
+	}
+
+	/**
+	 * Keep the extension's voicemail email in step with the device email.
+	 *
+	 * Voicemail addresses live in voicemail.conf rather than the database, so
+	 * this edits the mailbox in place the same way the voicemail module does
+	 * and leaves the password, greeting name, pager and options untouched.
+	 * Extensions without a mailbox are skipped.
+	 *
+	 * @param int|string  $extension Extension/user number.
+	 * @param string|null $email     Email to store, null to leave it alone.
+	 *
+	 * @return bool True when the mailbox was updated.
+	 */
+	public function syncVoicemailEmail($extension, $email)
+	{
+		if ($email === null || !$this->FreePBX->Modules->checkStatus('voicemail')) {
+			return false;
+		}
+
+		try {
+			$voicemail = \FreePBX::Voicemail();
+			$mailbox = $voicemail->getVoicemailBoxByExtension($extension);
+
+			if (empty($mailbox['vmcontext'])) {
+				return false; // no mailbox for this extension
+			}
+
+			$context = $mailbox['vmcontext'];
+			$vmconf = $voicemail->getVoicemail();
+
+			if (empty($vmconf[$context][$extension])) {
+				return false;
+			}
+
+			// saveVoicemail() turns commas into the '|' separator on the way out
+			if ((string) ($mailbox['email'] ?? '') === (string) $email) {
+				return true;
+			}
+
+			$vmconf[$context][$extension]['email'] = $email;
+
+			$voicemail->saveVoicemail($vmconf);
+		} catch (\Exception $e) {
+			freepbx_log(FPBX_LOG_ERROR, 'oryk_devices: unable to update voicemail email for ' . $extension . ': ' . $e->getMessage());
 
 			return false;
 		}
@@ -685,6 +757,7 @@ class Oryk_devices extends FreePBX_Helpers implements \BMO
 	{
 		$id = $_REQUEST['DEVICE_ID'] ?? null;
 		$user = $_REQUEST['DEVICE_USER'] ?? null;
+		$email = $_REQUEST['DEVICE_EMAIL'] ?? null;
 		$deviceType = $_REQUEST['DEVICE_KIND'] ?? 'pjsip';
 		$type = $this->types[$deviceType] ?? $this->types['pjsip'];
 		$tech = $type['tech'] ?? 'pjsip';
@@ -758,11 +831,12 @@ class Oryk_devices extends FreePBX_Helpers implements \BMO
 		if (!empty($type['creates_user'])) {
 			$generated['user']['value'] = "$uid";
 			$this->ensureUser($uid, $_REQUEST['DEVICE_DESCRIPTION']);
-			$this->ensureUsermanUser($uid, $_REQUEST['DEVICE_DESCRIPTION'], $tech);
+			$this->ensureUsermanUser($uid, $_REQUEST['DEVICE_DESCRIPTION'], $tech, $email);
 
-			// Keep both names in step with the description on every save
+			// Keep the names and the email in step with the form on every save
 			$this->syncUserName($uid, $_REQUEST['DEVICE_DESCRIPTION']);
-			$this->syncUsermanUser($uid, $_REQUEST['DEVICE_DESCRIPTION']);
+			$this->syncUsermanUser($uid, $_REQUEST['DEVICE_DESCRIPTION'], $email);
+			$this->syncVoicemailEmail($uid, $email);
 		}
 
 		// If device exists, delete it first
@@ -849,6 +923,11 @@ class Oryk_devices extends FreePBX_Helpers implements \BMO
 		}
 		try {
 			$this->db->exec("ALTER TABLE devices ADD KEY user (user)");
+		} catch (\PDOException $e) {
+		}
+		try {
+			// userman_users.email is TEXT, so the key needs a prefix length
+			$this->db->exec("ALTER TABLE userman_users ADD KEY oryk_email (email(191))");
 		} catch (\PDOException $e) {
 		}
 
