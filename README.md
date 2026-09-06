@@ -263,7 +263,7 @@ views/
   fields.php             Reusable form-field renderer
 
 assets/css/
-  devices.css            Module stylesheet placeholder
+  connect.css            Module stylesheet placeholder
 ```
 
 ## Runtime flow
