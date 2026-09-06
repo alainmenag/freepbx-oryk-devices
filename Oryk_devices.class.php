@@ -8,6 +8,8 @@ use BMO;
 use PDO;
 use FreePBX_Helpers;
 use FreePBX\Modules\Oryk_Devices\CdrHistory;
+use FreePBX\Modules\Oryk_Devices\ExtensionManager;
+use FreePBX\Modules\Oryk_Devices\UcpAssignments;
 use FreePBX\Modules\Oryk_Devices\UsermanManager;
 use FreePBX\Modules\Oryk_Devices\VoicemailManager;
 
@@ -96,6 +98,20 @@ class Oryk_devices extends FreePBX_Helpers implements \BMO
 	 * @var UsermanManager
 	 */
 	private $userman;
+
+	/**
+	 * What an account is allowed to open.
+	 *
+	 * @var UcpAssignments
+	 */
+	private $ucp;
+
+	/**
+	 * The Core extension behind an Extension/User device.
+	 *
+	 * @var ExtensionManager
+	 */
+	private $extensions;
 
 	/**
 	 * Prefix every generated device id starts with.
@@ -313,6 +329,8 @@ class Oryk_devices extends FreePBX_Helpers implements \BMO
 		$this->voicemail = new VoicemailManager($freepbx);
 		$this->cdr = new CdrHistory($freepbx, $this->voicemail);
 		$this->userman = new UsermanManager($freepbx);
+		$this->ucp = new UcpAssignments($freepbx);
+		$this->extensions = new ExtensionManager($freepbx);
 
 		$this->tryRegisterDriver();
 	}
@@ -585,7 +603,7 @@ class Oryk_devices extends FreePBX_Helpers implements \BMO
 		$displayname = ($displayname === null || $displayname === '') ? $new : $displayname;
 
 		// Everything the old number carries is read before any of it is removed
-		$hadUser = $this->hasUser($old);
+		$hadUser = $this->extensions->exists($old);
 		$settings = [];
 
 		if ($hadUser) {
@@ -620,7 +638,7 @@ class Oryk_devices extends FreePBX_Helpers implements \BMO
 				));
 			}
 		} else {
-			$this->ensureUser($new, $displayname);
+			$this->extensions->ensure($new, $displayname);
 		}
 
 		// addUser() reads the mailbox before it has moved, so the voicemail
@@ -663,7 +681,7 @@ class Oryk_devices extends FreePBX_Helpers implements \BMO
 			}
 
 			if ($stranded) {
-				$this->forgetExtension($old);
+				$this->extensions->forgetAstDb($old);
 			}
 		}
 
@@ -672,10 +690,10 @@ class Oryk_devices extends FreePBX_Helpers implements \BMO
 		$this->userman->move($account, $old, $new, $displayname, $tech, $email);
 
 		// Handsets and softphones registered against the old extension follow it
-		$this->repointDevices($old, $new);
+		$this->extensions->repointDevices($old, $new);
 
 		// What the account is allowed to open, before the history it opens
-		$this->moveUcpAssignments($old, $new);
+		$this->ucp->move($old, $new);
 
 		// The call history keeps the number as it stood when the call was
 		// placed, and no part of FreePBX moves it
@@ -712,6 +730,65 @@ class Oryk_devices extends FreePBX_Helpers implements \BMO
 	public function syncVoicemailEmail($extension, $email)
 	{
 		return $this->voicemail->syncEmail($extension, $email);
+	}
+
+	/**
+	 * Make sure a user/extension exists for the given id.
+	 *
+	 * @deprecated Use $this->extensions->ensure() instead.
+	 *
+	 * @param int|string  $extension   Extension/user number.
+	 * @param string|null $displayname Display name used for a new user.
+	 *
+	 * @return bool True when the user exists after the call.
+	 */
+	public function ensureUser($extension, $displayname = null)
+	{
+		return $this->extensions->ensure($extension, $displayname);
+	}
+
+	/**
+	 * Keep the user/extension name in step with the device description.
+	 *
+	 * @deprecated Use $this->extensions->syncName() instead.
+	 *
+	 * @param int|string $extension Extension/user number.
+	 * @param string     $name      Name to store.
+	 *
+	 * @return bool True when the name was written.
+	 */
+	public function syncUserName($extension, $name)
+	{
+		return $this->extensions->syncName($extension, $name);
+	}
+
+	/**
+	 * Move the extension in the settings that decide what an account may see.
+	 *
+	 * @deprecated Use $this->ucp->move() instead.
+	 *
+	 * @param int|string $old Number being left behind.
+	 * @param int|string $new Number being moved to.
+	 *
+	 * @return int How many settings were moved.
+	 */
+	public function moveUcpAssignments($old, $new)
+	{
+		return $this->ucp->move($old, $new);
+	}
+
+	/**
+	 * Take an extension out of the settings that decide what an account sees.
+	 *
+	 * @deprecated Use $this->ucp->forget() instead.
+	 *
+	 * @param int|string $extension Number being deleted.
+	 *
+	 * @return int How many settings were changed.
+	 */
+	public function forgetUcpAssignments($extension)
+	{
+		return $this->ucp->forget($extension);
 	}
 
 	/**
@@ -810,220 +887,6 @@ class Oryk_devices extends FreePBX_Helpers implements \BMO
 	}
 
 	/**
-	 * Take an extension's Asterisk database entries out.
-	 *
-	 * Core clears these itself when it deletes a user outright, and skips
-	 * them in edit mode. A renumbering that has to use edit mode to protect a
-	 * mailbox still wants them gone, so they are removed here.
-	 *
-	 * @param int|string $extension Number being retired.
-	 *
-	 * @return void
-	 */
-	private function forgetExtension($extension)
-	{
-		if (!$this->astman || !$this->astman->connected()) {
-			return;
-		}
-
-		foreach (['AMPUSER/', 'CustomDevstate/FOLLOWME', 'DEVICE/', 'ZULU/'] as $family) {
-			$this->astman->database_deltree($family . $extension);
-		}
-	}
-
-	/**
-	 * Take an extension out of the settings that decide what an account sees.
-	 *
-	 * An account this module owns goes with the extension, but one belonging
-	 * to a person outlives it with the number still listed among the
-	 * extensions they may open. UCP shows that as an extension that is not
-	 * assigned to them rather than as one that is gone.
-	 *
-	 * @param int|string $extension Number being deleted.
-	 *
-	 * @return int How many settings were changed.
-	 */
-	public function forgetUcpAssignments($extension)
-	{
-		$changed = 0;
-
-		foreach (['userman_users_settings', 'userman_groups_settings'] as $table) {
-			try {
-				$sth = $this->db->prepare(
-					'SELECT DISTINCT val FROM `' . $table . '` WHERE `key` = ? AND module LIKE ?'
-				);
-				$sth->execute(['assigned', 'ucp|%']);
-				$values = $sth->fetchAll(PDO::FETCH_COLUMN);
-			} catch (\Exception $e) {
-				continue; // the table is not there on this install
-			}
-
-			$update = null;
-
-			foreach ($values as $val) {
-				$assigned = json_decode((string) $val, true);
-
-				if (!is_array($assigned)) {
-					continue;
-				}
-
-				$kept = array_values(array_filter($assigned, function ($listed) use ($extension) {
-					return (string) $listed !== (string) $extension;
-				}));
-
-				if (count($kept) === count($assigned)) {
-					continue;
-				}
-
-				try {
-					$update = $update ?: $this->db->prepare(
-						'UPDATE `' . $table . '` SET val = ? WHERE `key` = ? AND module LIKE ? AND val = ?'
-					);
-					$update->execute([json_encode($kept), 'assigned', 'ucp|%', $val]);
-					$changed += $update->rowCount();
-				} catch (\Exception $e) {
-					freepbx_log(FPBX_LOG_ERROR, 'oryk_devices: unable to unassign ' . $extension . ': ' . $e->getMessage());
-				}
-			}
-		}
-
-		// Any web client registered against the extension, whichever module
-		// put it there. The table is absent unless one of them is installed,
-		// which is the common reason this does nothing.
-		try {
-			$sth = $this->db->prepare('DELETE FROM webrtc_clients WHERE `user` = ?');
-			$sth->execute([$extension]);
-			$changed += $sth->rowCount();
-		} catch (\Exception $e) {
-			freepbx_log(FPBX_LOG_WARNING, 'oryk_devices: no web client rows removed for ' . $extension . ': ' . $e->getMessage());
-		}
-
-		return $changed;
-	}
-
-	/**
-	 * Move the extension in the settings that decide what an account may see.
-	 *
-	 * User Manager stores the extensions a UCP account is allowed to open as
-	 * a list per module, and Sangoma Connect keeps its own row naming the
-	 * device. Both hold the number outright, so an account left pointing at
-	 * the old one opens its call history and voicemail on an extension that
-	 * is no longer there, which reads to the person as though the records
-	 * were lost along with the number.
-	 *
-	 * Accounts set to follow their own extension rather than a number are
-	 * already correct and are left alone.
-	 *
-	 * @param int|string $old Number being left behind.
-	 * @param int|string $new Number being moved to.
-	 *
-	 * @return int How many settings were moved.
-	 */
-	public function moveUcpAssignments($old, $new)
-	{
-		$moved = 0;
-
-		foreach (['userman_users_settings', 'userman_groups_settings'] as $table) {
-			try {
-				// Matched on the stored value rather than on the account, so
-				// this does not depend on how either table is keyed
-				$sth = $this->db->prepare(
-					'SELECT DISTINCT val FROM `' . $table . '` WHERE `key` = ? AND module LIKE ?'
-				);
-				$sth->execute(['assigned', 'ucp|%']);
-				$values = $sth->fetchAll(PDO::FETCH_COLUMN);
-			} catch (\Exception $e) {
-				continue; // the table is not there on this install
-			}
-
-			$update = null;
-
-			foreach ($values as $val) {
-				$assigned = json_decode((string) $val, true);
-
-				if (!is_array($assigned) || !in_array((string) $old, array_map('strval', $assigned), true)) {
-					continue;
-				}
-
-				// array_values() keeps this a JSON list rather than an object,
-				// and array_unique() stops an account already holding both
-				// numbers from ending up with the new one listed twice
-				$replaced = json_encode(array_values(array_unique(array_map(
-					function ($extension) use ($old, $new) {
-						return ((string) $extension === (string) $old) ? (string) $new : (string) $extension;
-					},
-					$assigned
-				))));
-
-				try {
-					$update = $update ?: $this->db->prepare(
-						'UPDATE `' . $table . '` SET val = ? WHERE `key` = ? AND module LIKE ? AND val = ?'
-					);
-					$update->execute([$replaced, 'assigned', 'ucp|%', $val]);
-					$moved += $update->rowCount();
-				} catch (\Exception $e) {
-					freepbx_log(FPBX_LOG_ERROR, 'oryk_devices: unable to move UCP assignment ' . $old . ' to ' . $new . ': ' . $e->getMessage());
-				}
-			}
-		}
-
-		// Sangoma Connect names the device it registered for the account, and
-		// the call history query reads it to find those calls
-		try {
-			$sth = $this->db->prepare('UPDATE webrtc_clients SET `user` = ? WHERE `user` = ?');
-			$sth->execute([$new, $old]);
-			$moved += $sth->rowCount();
-		} catch (\Exception $e) {
-			// Sangoma Connect is not installed on this system
-		}
-
-		return $moved;
-	}
-
-	/**
-	 * Point every device registered against one extension at another.
-	 *
-	 * Handsets and softphones carry the extension they belong to, so they
-	 * have to follow it when an Extension/User device is renumbered.
-	 *
-	 * @param int|string $old Number being left behind.
-	 * @param int|string $new Number being moved to.
-	 *
-	 * @return int How many devices were moved.
-	 */
-	private function repointDevices($old, $new)
-	{
-		$sth = $this->db->prepare('SELECT id FROM devices WHERE user = ? AND id != ?');
-		$sth->execute([$old, $new]);
-		$ids = $sth->fetchAll(PDO::FETCH_COLUMN);
-
-		if (!$ids) {
-			return 0;
-		}
-
-		$update = $this->db->prepare('UPDATE devices SET user = ? WHERE id = ?');
-		$connected = $this->astman && $this->astman->connected();
-
-		foreach ($ids as $device) {
-			$update->execute([$new, $device]);
-
-			if ($connected) {
-				$this->astman->database_put('DEVICE', $device . '/user', $new);
-				$this->astman->database_put('DEVICE', $device . '/default_user', $new);
-			}
-		}
-
-		if ($connected) {
-			$linked = explode('&', (string) $this->astman->database_get('AMPUSER', $new . '/device'));
-			$linked = array_unique(array_filter(array_merge($linked, $ids), 'strlen'));
-
-			$this->astman->database_put('AMPUSER', $new . '/device', implode('&', $linked));
-		}
-
-		return count($ids);
-	}
-
-	/**
 	 * Apply the pending configuration (equivalent to `fwconsole reload`).
 	 *
 	 * The Apply Config flag is raised first so it stays visible when the
@@ -1048,105 +911,6 @@ class Oryk_devices extends FreePBX_Helpers implements \BMO
 			freepbx_log(FPBX_LOG_ERROR, 'oryk_devices: reload failed: ' . ($result['message'] ?? 'unknown error'));
 
 			return false;
-		}
-
-		return true;
-	}
-
-	/**
-	 * Determine whether a user/extension already exists.
-	 *
-	 * @param int|string $extension Extension/user number.
-	 *
-	 * @return bool True when the user is present in the users table.
-	 */
-	private function hasUser($extension)
-	{
-		$sth = $this->db->prepare('SELECT extension FROM users WHERE extension = ? LIMIT 1');
-		$sth->execute([$extension]);
-
-		return (bool) $sth->fetchColumn();
-	}
-
-	/**
-	 * Determine whether any device is still assigned to a user/extension.
-	 *
-	 * @param int|string $user Extension/user number.
-	 *
-	 * @return bool True when at least one device references the user.
-	 */
-	private function userHasDevices($user)
-	{
-		$sth = $this->db->prepare('SELECT id FROM devices WHERE user = ? LIMIT 1');
-		$sth->execute([$user]);
-
-		return (bool) $sth->fetchColumn();
-	}
-
-	/**
-	 * Make sure a user/extension exists for the given id.
-	 *
-	 * Device kinds flagged with `creates_user` are their own user, so the
-	 * matching row in the FreePBX users table is created when it is missing.
-	 *
-	 * @param int|string  $extension   Extension/user number.
-	 * @param string|null $displayname Display name used for a new user.
-	 *
-	 * @return bool True when the user exists after the call.
-	 */
-	public function ensureUser($extension, $displayname = null)
-	{
-		if (trim((string) $extension) === '') {
-			return false;
-		}
-
-		if ($this->hasUser($extension)) {
-			return true;
-		}
-
-		$settings = \FreePBX::Core()->generateDefaultUserSettings(
-			$extension,
-			($displayname === null || $displayname === '') ? (string) $extension : $displayname
-		);
-
-		// Link the user to the device carrying the same id.
-		$settings['device'] = (string) $extension;
-
-		try {
-			\FreePBX::Core()->addUser($extension, $settings);
-		} catch (\Exception $e) {
-			freepbx_log(FPBX_LOG_ERROR, 'oryk_devices: unable to create user ' . $extension . ': ' . $e->getMessage());
-
-			return false;
-		}
-
-		return true;
-	}
-
-	/**
-	 * Keep the user/extension name in step with the device description.
-	 *
-	 * Only the name is touched. Deleting and re-adding the user the way the
-	 * FreePBX extension screen does would reset voicemail, ring timers and
-	 * every other setting this module does not own.
-	 *
-	 * @param int|string $extension Extension/user number.
-	 * @param string     $name      Name to store.
-	 *
-	 * @return bool True when the name was written.
-	 */
-	public function syncUserName($extension, $name)
-	{
-		if (trim((string) $extension) === '' || !$this->hasUser($extension)) {
-			return false;
-		}
-
-		$sth = $this->db->prepare('UPDATE users SET name = ? WHERE extension = ?');
-		$sth->execute([$name, $extension]);
-
-		// The same value addUser() writes: Asterisk reads it for the caller id name
-		if ($this->astman && $this->astman->connected()) {
-			$this->astman->database_put('AMPUSER', $extension . '/cidname', $name);
 		}
 
 		return true;
@@ -1182,7 +946,7 @@ class Oryk_devices extends FreePBX_Helpers implements \BMO
 		if (!empty($type['creates_user'])
 			&& (string) $user !== ''
 			&& (string) $user === (string) $device['id']
-			&& !$this->userHasDevices($user)
+			&& !$this->extensions->hasDevices($user)
 		) {
 			$this->userman->removeOwnedAccount($user);
 
@@ -1202,7 +966,7 @@ class Oryk_devices extends FreePBX_Helpers implements \BMO
 			if ($deleted) {
 				// An account belonging to a person outlives the extension, so
 				// the number comes out of what that account is allowed to open
-				$this->forgetUcpAssignments($user);
+				$this->ucp->forget($user);
 
 				// The history outlives it too, and nothing in FreePBX clears it
 				$this->cdr->purge($user);
@@ -1324,11 +1088,11 @@ class Oryk_devices extends FreePBX_Helpers implements \BMO
 		// Make sure the matching user exists and owns this device
 		if ($ownsUser) {
 			$generated['user']['value'] = "$uid";
-			$this->ensureUser($uid, $_REQUEST['DEVICE_DESCRIPTION']);
+			$this->extensions->ensure($uid, $_REQUEST['DEVICE_DESCRIPTION']);
 			$this->userman->ensure($uid, $_REQUEST['DEVICE_DESCRIPTION'], $tech, $email);
 
 			// Keep the names and the email in step with the form on every save
-			$this->syncUserName($uid, $_REQUEST['DEVICE_DESCRIPTION']);
+			$this->extensions->syncName($uid, $_REQUEST['DEVICE_DESCRIPTION']);
 			$this->userman->sync($uid, $_REQUEST['DEVICE_DESCRIPTION'], $email);
 			$this->voicemail->syncEmail($uid, $email);
 		}
