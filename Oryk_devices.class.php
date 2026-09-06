@@ -47,6 +47,11 @@ class Oryk_devices extends FreePBX_Helpers implements \BMO
 			// The device is the extension: a user with the same id is created and linked.
 			'creates_user' => true,
 			'fields' => ['DEVICE_USER', 'DEVICE_EMAIL', 'HEADER_CREDENTIALS', 'DEVICE_ACCOUNT', 'DEVICE_SECRET'],
+			// Driver settings forced on every save, whatever the form sent
+			'settings' => [
+				'media_encryption' => 'sdes',
+				'media_encryption_optimistic' => 'yes',
+			],
 		],
 		'handset' => [
 			'title' => 'Handset',
@@ -1230,6 +1235,17 @@ class Oryk_devices extends FreePBX_Helpers implements \BMO
 
 		if (isset($generated['emergency_cid']['value']) && empty($generated['emergency_cid']['value'])) {
 			$generated['emergency_cid']['value'] = $uid;
+		}
+
+		// Settings the type pins down are not on the form, so they are applied
+		// here on every save and win over both the driver defaults and anything
+		// that came back from the browser
+		foreach (($type['settings'] ?? []) as $keyword => $value) {
+			if (!isset($generated[$keyword])) {
+				$generated[$keyword] = ['value' => null, 'flag' => 0];
+			}
+
+			$generated[$keyword]['value'] = $value;
 		}
 
 		//die(json_encode($generated));
