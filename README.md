@@ -93,11 +93,37 @@ account, so the **Extension/User** field sets all three.
   nothing is written.
 - **Changed on an existing device**, the device is renumbered. The extension
   keeps its settings, the User Manager account keeps its password, groups and
-  UCP settings, the mailbox and its messages move with it, and handsets or
-  softphones pointed at the old extension are repointed at the new one.
+  UCP settings, the mailbox and its messages move with it, the call history
+  follows, and handsets or softphones pointed at the old extension are
+  repointed at the new one.
 
 The old number is only given up once the extension exists on the new one, so a
 failed renumbering leaves the device where it was.
+
+#### What follows the number
+
+| | Where it lives | What moves |
+| --- | --- | --- |
+| Extension | `asterisk.users`, astdb | Settings, caller id, voicemail context |
+| User Manager account | `asterisk.userman_users` | Renamed with the number when the module owns it, otherwise only the assignment |
+| Mailbox | `voicemail.conf`, the voicemail spool | The entry, the messages on disk, and the `<id>@device` alias that message waiting and `*97` are reached through |
+| UCP access | `userman_*_settings`, `webrtc_clients` | The extensions a UCP account is allowed to open |
+| Call history | `asteriskcdrdb` | `src`, `dst`, `cnum`, `clid`, both channel names, across `cdr`, `transient_cdr`, `replicate_cdr` and `cel` |
+| Handsets and softphones | `asterisk.devices` | Repointed at the new extension |
+
+Nothing in FreePBX moves call detail records on its own: a record keeps the
+number as it stood when the call was placed, the CDR module subscribes to no
+core hook, and FreePBX has no renumbering of its own to hook into. The module
+rewrites the columns the CDR reports match on and the caller id string they
+display. Recording file names carry the extension too and are deliberately
+left alone, because the name has to keep matching the file on disk or the
+recording stops being playable.
+
+> [!NOTE]
+> Of the columns being rewritten only `dst` and `dstchannel` are indexed, so on
+> a system with a long call history the rewrite reads the CDR table end to end
+> and a renumbering can take a while. The PHP time limit is lifted for the
+> duration.
 
 ### Create an RTSP feed
 
@@ -244,6 +270,11 @@ fwconsole reload
 - Device updates delete and recreate the existing FreePBX device.
 - Renumbering an Extension/User device does not check other FreePBX
   destinations, such as ring groups or queues, for the number.
+- Renumbering rewrites historical call detail records in place. There is no
+  undo, and the change is not reflected in any CDR export taken beforehand.
+- A mailbox is not moved onto a number that already has one of its own. The
+  messages are left where they are, the renumbering continues, and the reason
+  is written to the FreePBX log.
 - Failures during a renumbering that follow the extension move (User Manager,
   mailbox, linked handsets) are logged rather than reported in the interface.
 - There is no automated test suite.
