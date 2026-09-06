@@ -82,6 +82,13 @@ class DeviceManager extends Service
 	private $cdr;
 
 	/**
+	 * The pjsip settings pinned on it outside what FreePBX generates.
+	 *
+	 * @var EndpointSettings
+	 */
+	private $endpoints;
+
+	/**
 	 * @param object              $freepbx    FreePBX application instance.
 	 * @param DeviceSchema        $schema     Device and field definitions.
 	 * @param NumberAllocator     $numbers    Number allocation.
@@ -91,6 +98,7 @@ class DeviceManager extends Service
 	 * @param VoicemailManager    $voicemail  Mailboxes.
 	 * @param UcpAssignments      $ucp        UCP assignments.
 	 * @param CdrHistory          $cdr        Call history.
+	 * @param EndpointSettings    $endpoints  Custom pjsip endpoint settings.
 	 */
 	public function __construct(
 		$freepbx,
@@ -101,7 +109,8 @@ class DeviceManager extends Service
 		UsermanManager $userman,
 		VoicemailManager $voicemail,
 		UcpAssignments $ucp,
-		CdrHistory $cdr
+		CdrHistory $cdr,
+		EndpointSettings $endpoints
 	) {
 		parent::__construct($freepbx);
 
@@ -113,6 +122,7 @@ class DeviceManager extends Service
 		$this->voicemail = $voicemail;
 		$this->ucp = $ucp;
 		$this->cdr = $cdr;
+		$this->endpoints = $endpoints;
 	}
 
 	/**
@@ -271,6 +281,18 @@ class DeviceManager extends Service
 		}
 
 		if ($ret) {
+			// The pjsip settings FreePBX has no field for, written to the
+			// file Asterisk reads after the endpoint it generates. A kind
+			// that is not a pjsip endpoint has none of them, and gives up
+			// any it was carrying when it was one.
+			if ($tech === 'pjsip') {
+				$this->endpoints->apply($uid);
+			} else {
+				$this->endpoints->forget($uid);
+			}
+
+			// Everything above is in the database and the files; this is
+			// what makes Asterisk read them
 			$this->reload();
 		}
 
@@ -302,6 +324,10 @@ class DeviceManager extends Service
 		$user = $device['user'] ?? null;
 
 		\FreePBX::Core()->delDevice($device['id']);
+
+		// Nothing in FreePBX knows the custom endpoint file, so the section
+		// this module put there would outlive the device that owned it
+		$this->endpoints->forget($device['id']);
 
 		// An Extension/User device owns its user, so it goes with the device
 		if (!empty($type['creates_user'])

@@ -12,6 +12,12 @@ namespace FreePBX\Modules\Oryk_Connect;
  * is forced on it whatever the form said; the sections a form is drawn in;
  * and every field, once, with the name it is stored under.
  *
+ * The one thing it is given is EndpointSettings, and only so the from
+ * domain field can show what leaving it blank would actually mean. That is
+ * the one field on the form where blank is not nothing: the endpoint falls
+ * back to the PBX, and a form that did not say so would be asking for a
+ * value nobody can see the current state of.
+ *
  * buildFormData() is the method. It is not a read from storage -- Core is
  * what holds a device -- it takes a device and returns it arranged the way
  * the form draws it: fields grouped by section, each carrying its own
@@ -23,6 +29,25 @@ namespace FreePBX\Modules\Oryk_Connect;
  */
 class DeviceSchema extends Service
 {
+	/**
+	 * What this module pins on an endpoint, which is where the from domain
+	 * a blank field falls back to comes from.
+	 *
+	 * @var EndpointSettings|null
+	 */
+	private $endpoints;
+
+	/**
+	 * @param object                $freepbx   FreePBX application instance.
+	 * @param EndpointSettings|null $endpoints Custom pjsip endpoint settings.
+	 */
+	public function __construct($freepbx, EndpointSettings $endpoints = null)
+	{
+		parent::__construct($freepbx);
+
+		$this->endpoints = $endpoints;
+	}
+
 	/**
 	 * Supported device types and their configuration definitions.
 	 *
@@ -36,7 +61,7 @@ class DeviceSchema extends Service
 			'tech' => 'pjsip',
 			// The device is the extension: a user with the same id is created and linked.
 			'creates_user' => true,
-			'fields' => ['DEVICE_USER', 'DEVICE_EMAIL', 'HEADER_CREDENTIALS', 'DEVICE_ACCOUNT', 'DEVICE_SECRET'],
+			'fields' => ['DEVICE_USER', 'DEVICE_EMAIL', 'DEVICE_FROM_DOMAIN', 'HEADER_CREDENTIALS', 'DEVICE_ACCOUNT', 'DEVICE_SECRET'],
 			// Driver settings forced on every save, whatever the form sent
 			'settings' => [
 				'media_encryption' => 'sdes',
@@ -48,14 +73,14 @@ class DeviceSchema extends Service
 			'icon' => 'fa-phone',
 			'suffix' => '001',
 			'tech' => 'pjsip',
-			'fields' => ['DEVICE_USER', 'HEADER_CREDENTIALS', 'DEVICE_ACCOUNT', 'DEVICE_SECRET', 'DEVICE_LINK', 'DEVICE_MANUFACTURER', 'DEVICE_MODEL'],
+			'fields' => ['DEVICE_USER', 'DEVICE_FROM_DOMAIN', 'HEADER_CREDENTIALS', 'DEVICE_ACCOUNT', 'DEVICE_SECRET', 'DEVICE_LINK', 'DEVICE_MANUFACTURER', 'DEVICE_MODEL'],
 		],
 		'softphone' => [
 			'title' => 'Softphone',
 			'icon' => 'fa-phone',
 			'suffix' => '002',
 			'tech' => 'pjsip',
-			'fields' => ['DEVICE_USER', 'HEADER_CREDENTIALS', 'DEVICE_ACCOUNT', 'DEVICE_SECRET'],
+			'fields' => ['DEVICE_USER', 'DEVICE_FROM_DOMAIN', 'HEADER_CREDENTIALS', 'DEVICE_ACCOUNT', 'DEVICE_SECRET'],
 		],
 		'rtsp' => [
 			'title' => 'RTSP Feed',
@@ -185,6 +210,14 @@ class DeviceSchema extends Service
 			'maxLength' => 255,
 			'group' => 'location',
 		],
+		'DEVICE_FROM_DOMAIN' => [
+			'type' => 'text',
+			'title' => 'From Domain',
+			'name' => 'from_domain',
+			'maxLength' => 255,
+			'group' => 'location',
+			'help' => 'The domain this endpoint puts in the From header. Left blank, it follows the one set for the PBX.',
+		],
 		'DEVICE_LINK' => [
 			'type' => 'url',
 			'title' => 'Link',
@@ -253,6 +286,13 @@ class DeviceSchema extends Service
 			if ($key == 'DEVICE_KIND') {
 				$obj['type'] = 'select';
 				$obj['options'] = $this->types;
+			}
+
+			// Blank here is not nothing: the endpoint falls back to the PBX,
+			// so the field is greyed out with what it would actually be given
+			// rather than with an example of what one looks like
+			if ($key === 'DEVICE_FROM_DOMAIN' && $this->endpoints) {
+				$obj['placeholder'] = $this->endpoints->fromDomain(null);
 			}
 
 			// Get value from alias or name

@@ -99,7 +99,7 @@
 							<input type="<?php echo $type; ?>" class="form-control"
 								id="<?php echo $key; ?>"
 								name="<?php echo $key; ?>"
-								placeholder="<?php echo ($set['placeholder'] ?? ''); ?>"
+								placeholder="<?php echo htmlspecialchars((string) ($set['placeholder'] ?? '')); ?>"
 								value="<?php echo htmlspecialchars((string) $value); ?>"
 								<?php echo ($set['disabled'] ?? false) ? 'disabled' : ''; ?>
 								<?php echo ($set['required'] ?? false) ? 'required' : ''; ?>

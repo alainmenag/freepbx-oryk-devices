@@ -15,15 +15,21 @@
 require_once __DIR__ . '/stubs.php';
 require_once __DIR__ . '/namespacing.php';
 
+use FreePBX\Modules\Oryk_Connect\AsteriskConfig;
 use FreePBX\Modules\Oryk_Connect\CdrHistory;
 use FreePBX\Modules\Oryk_Connect\DeviceManager;
 use FreePBX\Modules\Oryk_Connect\DeviceSchema;
+use FreePBX\Modules\Oryk_Connect\EndpointSettings;
 use FreePBX\Modules\Oryk_Connect\ExtensionManager;
 use FreePBX\Modules\Oryk_Connect\ExtensionRenumberer;
 use FreePBX\Modules\Oryk_Connect\NumberAllocator;
 use FreePBX\Modules\Oryk_Connect\UcpAssignments;
 use FreePBX\Modules\Oryk_Connect\UsermanManager;
 use FreePBX\Modules\Oryk_Connect\VoicemailManager;
+
+// What the PBX is set to, for the tests that would otherwise depend on what
+// the machine running them happens to be called
+define('TEST_FROM_DOMAIN', 'oryk.io');
 
 $passed = 0;
 $failed = 0;
@@ -43,28 +49,52 @@ function is_eq($label, $got, $want)
 	);
 }
 
+$TEMPORARY = [];
+
+/** A scratch file that goes away when the test run ends. */
+function scratch_file()
+{
+	global $TEMPORARY;
+
+	$path = tempnam(sys_get_temp_dir(), 'oryk-conf-');
+	$TEMPORARY[] = $path;
+
+	return $path;
+}
+
 /** Build the whole set, the way the module class does. */
 function build()
 {
 	FreePBX::$core = new StubCore();
 	FreePBX::$cdr = new StubCdr();
+	FreePBX::$conf = new StubConfig();
+	FreePBX::$config = ['ASTSPOOLDIR' => '/var/spool/asterisk'];
 
 	$app = new StubApp();
-	$schema = new DeviceSchema($app);
+
+	// The one thing here that touches the disk. It is pointed at a scratch
+	// file rather than /etc/asterisk, and the tests read it back.
+	$conf = scratch_file();
+	$endpoints = new EndpointSettings($app, new AsteriskConfig($app, $conf), TEST_FROM_DOMAIN);
+
+	$schema = new DeviceSchema($app, $endpoints);
 	$voicemail = new VoicemailManager($app);
 	$cdr = new CdrHistory($app, $voicemail);
 	$userman = new UsermanManager($app);
 	$ucp = new UcpAssignments($app);
 	$extensions = new ExtensionManager($app);
 	$numbers = new NumberAllocator($app, $userman);
-	$renumberer = new ExtensionRenumberer($app, $extensions, $voicemail, $userman, $ucp, $cdr);
+	$renumberer = new ExtensionRenumberer(
+		$app, $extensions, $voicemail, $userman, $ucp, $cdr, $endpoints
+	);
 	$devices = new DeviceManager(
-		$app, $schema, $numbers, $renumberer, $extensions, $userman, $voicemail, $ucp, $cdr
+		$app, $schema, $numbers, $renumberer, $extensions, $userman, $voicemail,
+		$ucp, $cdr, $endpoints
 	);
 
 	return compact(
 		'app', 'schema', 'voicemail', 'cdr', 'userman', 'ucp',
-		'extensions', 'numbers', 'renumberer', 'devices'
+		'extensions', 'numbers', 'renumberer', 'devices', 'endpoints', 'conf'
 	);
 }
 
@@ -76,6 +106,7 @@ foreach (['schema' => 'DeviceSchema', 'voicemail' => 'VoicemailManager',
           'cdr' => 'CdrHistory', 'userman' => 'UsermanManager',
           'ucp' => 'UcpAssignments', 'extensions' => 'ExtensionManager',
           'numbers' => 'NumberAllocator', 'renumberer' => 'ExtensionRenumberer',
+          'endpoints' => 'EndpointSettings',
           'devices' => 'DeviceManager'] as $key => $class) {
 	is_eq($class, get_class($s[$key]), 'FreePBX\Modules\Oryk_Connect\\' . $class);
 }
@@ -375,6 +406,289 @@ is_eq('nothing was logged as a failure',
 	array_values(array_filter($LOG, function ($l) {
 		return strpos($l, 'ERROR') === 0;
 	})), []);
+
+echo "\nthe custom endpoint file: everything this module did not write survives:\n";
+
+$s = build();
+$conf = $s['endpoints']->config();
+
+file_put_contents($s['conf'], <<<'CONF'
+;
+; pjsip.endpoint_custom_post.conf
+;
+
+[9990000001](+)
+from_domain=old.example.com
+callerid=Front Desk <9990000001>  ; typed by hand
+
+[trunk-to-carrier](+)
+; another module put this here
+from_domain=carrier.example.net
+
+;--
+[9990000009](+)
+from_domain=never-read.example.com
+--;
+
+CONF
+);
+
+is_eq('a section is read back whole', $conf->values('9990000001'),
+	['from_domain' => 'old.example.com', 'callerid' => 'Front Desk <9990000001>']);
+is_eq('a section inside a comment block is not a section',
+	$conf->has('9990000009'), false);
+is_eq('and the rest of the file is seen',
+	$conf->sections(), ['9990000001', 'trunk-to-carrier']);
+
+$conf->edit(function (AsteriskConfig $c) {
+	$c->set('9990000001', [
+		'from_domain' => 'oryk.io',
+		'callerid' => 'Front Desk <1001>',
+	], '(+)');
+});
+
+$text = file_get_contents($s['conf']);
+
+is_eq('the value is rewritten where it stood',
+	strpos($text, "[9990000001](+)\nfrom_domain=oryk.io\n") !== false, true);
+is_eq('the old value is gone', strpos($text, 'old.example.com'), false);
+is_eq('a comment after a value it changed is kept',
+	strpos($text, 'callerid=Front Desk <1001> ; typed by hand') !== false, true);
+is_eq("another module's section is untouched",
+	strpos($text, "[trunk-to-carrier](+)\n; another module put this here\nfrom_domain=carrier.example.net") !== false,
+	true);
+is_eq('the comment block is still commented out',
+	strpos($text, ";--\n[9990000009](+)") !== false, true);
+is_eq('the file it did not open is the file it did not change',
+	substr_count($text, 'from_domain='), 3);
+
+echo "\n  a setting the section does not have yet goes inside it:\n";
+
+$conf->edit(function (AsteriskConfig $c) {
+	$c->set('9990000001', ['send_rpid' => 'yes'], '(+)');
+});
+
+$text = file_get_contents($s['conf']);
+
+is_eq('after the last setting in the section, not at the end of the file',
+	strpos($text, "callerid=Front Desk <1001> ; typed by hand\nsend_rpid=yes\n") !== false, true);
+is_eq('and the section after it is where it was',
+	strpos($text, "[trunk-to-carrier](+)") !== false, true);
+
+echo "\n  writing what the file already says changes nothing:\n";
+
+$before = file_get_contents($s['conf']);
+
+$conf->edit(function (AsteriskConfig $c) {
+	$c->set('9990000001', ['send_rpid' => 'yes'], '(+)');
+});
+
+is_eq('the file is byte for byte what it was', file_get_contents($s['conf']), $before);
+is_eq('and nothing was marked as needing a write', $conf->changed(), false);
+
+echo "\n  a section that is not there yet is added, with the flags it needs:\n";
+
+$conf->edit(function (AsteriskConfig $c) {
+	$c->set('9990000042', ['from_domain' => 'oryk.io'], '(+)');
+});
+
+$text = file_get_contents($s['conf']);
+
+is_eq('appended, adding to the generated endpoint rather than replacing it',
+	strpos($text, "[9990000042](+)\nfrom_domain=oryk.io") !== false, true);
+
+echo "\n  and taken out again without taking anything else with it:\n";
+
+$conf->edit(function (AsteriskConfig $c) {
+	$c->removeSection('9990000001');
+});
+
+$text = file_get_contents($s['conf']);
+
+is_eq('the section is gone', $conf->has('9990000001'), false);
+is_eq('every setting in it went too', strpos($text, 'send_rpid'), false);
+is_eq("the other module's section is still there",
+	$conf->values('trunk-to-carrier'), ['from_domain' => 'carrier.example.net']);
+is_eq('so is the file header', strpos($text, '; pjsip.endpoint_custom_post.conf') !== false, true);
+is_eq('so is the comment block', strpos($text, '--;') !== false, true);
+
+echo "\n  what would come back as something else is refused, not written:\n";
+
+foreach ([
+	'a value carrying a newline' => ['9990000001', ['from_domain' => "x.example.com\nmatch=203.0.113.4"]],
+	'a section name carrying a bracket' => ['999]000[1', ['from_domain' => 'x.example.com']],
+	'a section name that is empty' => ['   ', ['from_domain' => 'x.example.com']],
+	'a setting name with a space in it' => ['9990000001', ['from domain' => 'x.example.com']],
+] as $label => $bad) {
+	$threw = false;
+
+	try {
+		$conf->set($bad[0], $bad[1], '(+)');
+	} catch (\InvalidArgumentException $e) {
+		$threw = true;
+	}
+
+	is_eq($label . ' is refused', $threw, true);
+}
+
+echo "\nsaving a device writes its endpoint settings, deleting it takes them back:\n";
+
+$s = build();
+$uid = $s['devices']->store([
+	'DEVICE_ID' => '', 'DEVICE_KIND' => 'pjsip', 'DEVICE_USER' => '1001',
+	'DEVICE_DESCRIPTION' => 'Front Desk',
+]);
+
+$text = file_get_contents($s['conf']);
+
+is_eq('the endpoint gets a section that adds to the generated one',
+	strpos($text, '[1001](+)') !== false, true);
+is_eq('carrying the from domain',
+	$s['endpoints']->config()->get('1001', 'from_domain'), TEST_FROM_DOMAIN);
+
+FreePBX::$core->devices['1001'] = [
+	'id' => '1001', 'tech' => 'pjsip', 'kind' => 'pjsip',
+	'description' => 'Front Desk', 'user' => '1001',
+];
+
+$s['devices']->remove('1001');
+
+is_eq('and gives it up with the device',
+	$s['endpoints']->config()->has('1001'), false);
+
+echo "\n  a kind that is not a pjsip endpoint has none, and gives up any it had:\n";
+
+$s = build();
+$s['app']->Database->answers = ['MAX(CAST(id' => '9990000030'];
+$s['endpoints']->apply('9990000031');
+
+is_eq('it had one', $s['endpoints']->config()->has('9990000031'), true);
+
+$s['devices']->store([
+	'DEVICE_ID' => '', 'DEVICE_KIND' => 'rtsp', 'DEVICE_DESCRIPTION' => 'Front Door',
+]);
+
+is_eq('and does not once it is a feed', $s['endpoints']->config()->has('9990000031'), false);
+
+echo "\n  a renumbered device takes its settings to the new number:\n";
+
+$s = build();
+$s['endpoints']->apply('1001', ['send_rpid' => 'yes']);
+$s['endpoints']->move('1001', '2002');
+$conf = $s['endpoints']->config();
+
+is_eq('the old number gives them up', $conf->has('1001'), false);
+is_eq('the new number has what every endpoint gets',
+	$conf->get('2002', 'from_domain'), TEST_FROM_DOMAIN);
+is_eq('and what was written for this device alone',
+	$conf->get('2002', 'send_rpid'), 'yes');
+
+echo "\nwhere the from domain comes from, asked in order:\n";
+
+$s = build();
+
+is_eq('what the PBX is set to, when the device says nothing',
+	$s['endpoints']->fromDomain('1001'), TEST_FROM_DOMAIN);
+
+FreePBX::$core->devices['1001'] = [
+	'id' => '1001', 'tech' => 'pjsip', 'kind' => 'pjsip',
+	'description' => 'Front Desk', 'user' => '1001',
+	'from_domain' => 'desk.example.net',
+];
+
+is_eq('what the device says, when it says something',
+	$s['endpoints']->fromDomain('1001'), 'desk.example.net');
+is_eq('and the PBX answer is still there for everything else',
+	$s['endpoints']->fromDomain('1002'), TEST_FROM_DOMAIN);
+
+$s['endpoints']->apply('1001');
+
+is_eq('which is what gets written',
+	$s['endpoints']->config()->get('1001', 'from_domain'), 'desk.example.net');
+
+$loose = new EndpointSettings(new StubApp(), new AsteriskConfig(new StubApp(), scratch_file()));
+$fallback = $loose->fromDomain(null);
+
+is_eq('with nothing set at all, the PBX name or nothing -- never a name that is not a domain',
+	$fallback === '' || (strpos($fallback, '.') !== false
+		&& strpos($fallback, 'localhost') === false
+		&& substr($fallback, -6) !== '.local'), true);
+
+echo "\n  the PBX-wide answer is a FreePBX setting, in Advanced Settings:\n";
+
+$s = build();
+$endpoints = new EndpointSettings($s['app'], new AsteriskConfig($s['app'], scratch_file()));
+
+$endpoints->register();
+$defined = FreePBX::Config()->defined[EndpointSettings::SETTING] ?? [];
+
+is_eq('it is registered where an administrator would look for it',
+	[$defined['category'] ?? null, $defined['type'] ?? null, $defined['module'] ?? null],
+	['Oryk Connect', 'text', 'oryk_connect']);
+is_eq('blank is allowed, since blank is what asks for the hostname',
+	$defined['emptyok'] ?? null, 1);
+is_eq('and what is typed there has to look like a domain',
+	[
+		(bool) preg_match($defined['options'], 'oryk.io'),
+		(bool) preg_match($defined['options'], 'not a domain'),
+	],
+	[true, false]);
+
+$endpoints->setPbxDomain('set-in-advanced.example.net');
+
+is_eq('what is set there is what an endpoint gets',
+	$endpoints->fromDomain('1002'), 'set-in-advanced.example.net');
+
+$fresh = new EndpointSettings($s['app'], new AsteriskConfig($s['app'], scratch_file()));
+
+is_eq('and it is read from the setting, not remembered from the setting call',
+	$fresh->fromDomain('1002'), 'set-in-advanced.example.net');
+
+$endpoints->register();
+
+is_eq('registering again on an upgrade leaves it where it is',
+	FreePBX::Config()->get(EndpointSettings::SETTING), 'set-in-advanced.example.net');
+
+echo "\n  a setting that works out to nothing is taken off the endpoint:\n";
+
+$s = build();
+$s['endpoints']->apply('1001', ['send_rpid' => 'yes']);
+
+is_eq('it was written', $s['endpoints']->config()->get('1001', 'from_domain'), TEST_FROM_DOMAIN);
+
+$s['endpoints']->apply('1001', ['from_domain' => '']);
+
+is_eq('and now it is gone', $s['endpoints']->config()->get('1001', 'from_domain'), null);
+is_eq('while what was not asked about stays',
+	$s['endpoints']->config()->get('1001', 'send_rpid'), 'yes');
+
+echo "\n  and the form has somewhere to type it:\n";
+
+is_eq('the field is defined', isset($s['schema']->fields['DEVICE_FROM_DOMAIN']), true);
+is_eq('stored on the device the way a link or a model is',
+	$s['schema']->fields['DEVICE_FROM_DOMAIN']['name'] ?? null, 'from_domain');
+is_eq('with no example of a domain, since one would just be somebody else\'s',
+	isset($s['schema']->fields['DEVICE_FROM_DOMAIN']['example']), false);
+
+FreePBX::$core->devices['2001'] = [
+	'id' => '2001', 'tech' => 'pjsip', 'kind' => 'pjsip',
+	'description' => 'Front Desk', 'user' => '2001',
+];
+
+$form = $s['schema']->buildFormData('2001');
+
+is_eq('the field shows what leaving it blank would actually give the endpoint',
+	$form['location']['DEVICE_FROM_DOMAIN']['placeholder'] ?? null, TEST_FROM_DOMAIN);
+is_eq('as a placeholder, so it is not submitted as a value',
+	$form['location']['DEVICE_FROM_DOMAIN']['value'] ?? null, null);
+is_eq('offered on every kind that is a pjsip endpoint, and no others',
+	array_keys(array_filter($s['schema']->types, function ($type) {
+		return in_array('DEVICE_FROM_DOMAIN', $type['fields'] ?? [], true);
+	})), ['pjsip', 'handset', 'softphone']);
+
+foreach ($TEMPORARY as $path) {
+	@unlink($path);
+}
 
 printf("\n%d passed, %d failed\n", $passed, $failed);
 

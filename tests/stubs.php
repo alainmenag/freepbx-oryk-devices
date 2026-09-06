@@ -7,6 +7,8 @@
 // gives back is fixed and what it is asked is recorded, so a test can check
 // what a subsystem tried to do rather than what came of it.
 
+define('CONF_TYPE_TEXT', 'text');
+
 define('FPBX_LOG_ERROR', 'ERROR');
 define('FPBX_LOG_WARNING', 'WARNING');
 define('FPBX_LOG_INFO', 'INFO');
@@ -273,6 +275,42 @@ class StubCore
 	}
 }
 
+/**
+ * FreePBX's own settings, the ones Advanced Settings shows.
+ *
+ * It answers with what it holds, records what was defined, and keeps the
+ * one rule this module depends on: defining a setting that already exists
+ * leaves the value where it is.
+ */
+class StubConfig
+{
+	public $defined = [];
+
+	public function get($keyword, $passthru = false)
+	{
+		return FreePBX::$config[$keyword] ?? '';
+	}
+
+	public function update($keyword, $value, $commit = true, $override = true)
+	{
+		FreePBX::$config[$keyword] = $value;
+
+		return true;
+	}
+
+	public function define_conf_setting($keyword, $vars, $commit = false)
+	{
+		$this->defined[$keyword] = $vars;
+
+		// The real one keeps the value of a setting it already has
+		if (!array_key_exists($keyword, FreePBX::$config)) {
+			FreePBX::$config[$keyword] = $vars['value'];
+		}
+
+		return true;
+	}
+}
+
 class StubModules
 {
 	public $active = [];
@@ -317,14 +355,15 @@ class FreePBX
 		return self::$core;
 	}
 
+	public static $conf;
+
 	public static function Config()
 	{
-		return new class {
-			public function get($key)
-			{
-				return FreePBX::$config[$key] ?? '';
-			}
-		};
+		if (self::$conf === null) {
+			self::$conf = new StubConfig();
+		}
+
+		return self::$conf;
 	}
 
 	public static $cdr;

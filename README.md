@@ -15,6 +15,10 @@ Device records are managed through FreePBX Core. RTSP feeds are integrated with 
   - **RTSP Feed** — video source registered with MediaMTX.
 - Generate unique 10-digit device IDs beginning with `999`.
 - Trigger Endpoint Manager processing for PJSIP devices.
+- Pin custom PJSIP endpoint settings, such as `from_domain`, without
+  disturbing what other modules put in the same file. The value is taken from
+  the device, then from *Settings -> Advanced Settings*, then from the PBX
+  hostname.
 - Restart RTSP feeds from the device list.
 - Generate browser playback links for RTSP feeds.
 
@@ -259,6 +263,97 @@ Additional device values are stored as key/value rows in the FreePBX `asterisk.s
 
 When a new record does not have an ID, the module generates a 10-digit identifier beginning with `999`. When an existing device is saved, it is deleted and recreated through FreePBX Core.
 
+## Custom PJSIP endpoint settings
+
+FreePBX generates `pjsip.endpoint.conf` from the devices table on every
+reload, so a setting written there does not survive one, and a setting FreePBX
+has no field for cannot be put there at all. Asterisk reads
+`pjsip.endpoint_custom_post.conf` afterwards, and a section spelled with `(+)`
+adds to the endpoint of the same name rather than replacing it:
+
+```ini
+[9990000001](+)
+from_domain=oryk.io
+```
+
+Every save of a PJSIP device writes that section. What goes in it is
+`EndpointSettings::settings()`, which is one setting so far: a second is a
+line there and nothing else.
+
+### Where the from domain comes from
+
+Three questions, asked in order, and the first one answered wins:
+
+1. **What was typed on the device.** The device form has a *From Domain*
+   field on every kind that is a PJSIP endpoint. It is stored on the device
+   the way a management link or a model name is, and it is for the endpoint
+   that needs its own -- a tenant, a carrier, a test extension.
+
+   Left empty, the field shows the domain the endpoint would actually be
+   given -- the PBX setting, or the hostname when there is no setting -- as
+   its placeholder, rather than an example of what a domain looks like. It is
+   the one field on the form where blank means something, so it says what
+   blank means.
+2. **What the PBX is set to.** One value for the whole system, in
+   **Settings -> Advanced Settings**, under the *Oryk Connect* category, as
+   **From Domain** (`ORYK_FROM_DOMAIN`). This is where the answer normally
+   comes from.
+
+   The module registers the setting when it is installed, so it appears once
+   this version has been installed or upgraded (`fwconsole ma install
+   oryk_connect`). Registering it again on a later upgrade keeps whatever is
+   set: FreePBX takes only the description and presentation from the module
+   and leaves the value alone. FreePBX validates what is typed against the
+   same pattern a hostname has to match, and blank is allowed, because blank
+   is what asks for the hostname.
+
+   For a script rather than an administrator, `EndpointSettings::setPbxDomain()`
+   writes the same setting.
+
+3. **What the PBX is called.** `gethostname()`, so a system nobody has
+   configured still says something true. It is used only when it is actually
+   a domain name: a bare hostname, a `.local` picked up off the network, or
+   the `localhost.localdomain` a fresh install starts with is not used at
+   all, because announcing one of those in a From header is worse than
+   announcing nothing.
+
+Nothing resolved means no `from_domain` is written, and one already on the
+endpoint is taken off rather than left behind. Clearing the device field
+falls back to the PBX value, and clearing the PBX value falls back to the
+hostname.
+
+A device picks up a changed PBX value on its next save; nothing already
+written changes until then.
+
+The file is shared ground. FreePBX never rewrites it, which is the point of
+it, and any other module wanting an endpoint setting writes into the same
+file. So a save does not rebuild it:
+
+- a setting already in the section is rewritten where it stands, keeping its
+  indentation, its separator, its line ending and any comment after it;
+- a setting that is not there yet is added inside the section, after the last
+  one, rather than at the end of the file;
+- a section that is not there yet is appended, with the `(+)` that makes it
+  add to the generated endpoint;
+- everything else -- comments, spacing, ordering, and every section this
+  module did not write -- is left byte for byte;
+- a save that changes nothing writes nothing at all.
+
+`;-- --;` comment blocks are understood rather than skipped, because a section
+header inside one is not a section and a setting inside one is not set.
+
+Deleting a device takes its section out. Renumbering one moves it, carrying
+anything written for that device beyond what every device gets. A device
+changed to a kind that is not a PJSIP endpoint gives its section up.
+
+The file is replaced rather than edited in place: the new contents are written
+beside it and renamed over it, with the mode and ownership of the file being
+replaced, so nothing ever reads it half-written. The read, the change and the
+write are held under a lock, so two administrators saving two devices at the
+same moment cannot lose one of the changes.
+
+None of it is live until Apply Config, which a save already does.
+
 ## Project structure
 
 ```text
@@ -273,6 +368,10 @@ src/
                          application, the database, the manager connection
   DeviceSchema.php       What a device is, as a form: kinds, groups, fields
   DeviceManager.php      Saving and deleting a device
+  AsteriskConfig.php     One Asterisk configuration file, changed without
+                         disturbing anything this module did not write
+  EndpointSettings.php   The pjsip settings pinned on a device, and where
+                         they go
   NumberAllocator.php    Which numbers are free, and what the next one is
   ExtensionRenumberer.php  Moving a device to a different number, in order
   ExtensionManager.php   The Core extension and the Asterisk keys about it
@@ -319,6 +418,10 @@ The work itself is delegated:
    together.
 5. `ExtensionManager`, `UsermanManager`, `VoicemailManager`,
    `UcpAssignments` and `CdrHistory` each own one of those.
+6. `EndpointSettings` decides what this module pins on a PJSIP endpoint
+   beyond what FreePBX generates, and where each value comes from, and
+   `AsteriskConfig` puts it in the file without touching what anything else
+   left there.
 
 The device list in `views/devices.php` uses FreePBX's Bootstrap Table integration to request rows from:
 
@@ -412,6 +515,21 @@ refuses what it should; that the call history purge refuses anything that
 is not a number; and that saving a device produces the settings Core is
 meant to be handed, without touching the caller's copy of the form.
 
+The custom endpoint file is checked against a scratch file rather than
+`/etc/asterisk`: that a section is read back whole, that one inside a comment
+block is not read at all, that changing a setting leaves every other section
+and comment exactly as it was, that a setting the section does not have goes
+inside it, that writing what the file already says writes nothing, that a
+value or a name that would come back as something else is refused, and that a
+device saved, deleted and renumbered gains, loses and moves its section. The
+from domain is checked at each step of the chain: the device value over the
+PBX one, the PBX one when the device is silent, a hostname only when it is a
+domain name, and a setting that works out to nothing taken off the endpoint
+rather than left standing. The FreePBX setting is checked too -- that it is
+registered in the module's own category, that blank is allowed, that what is
+typed has to look like a domain, and that registering it again on an upgrade
+leaves an administrator's value where it is.
+
 One of the checks is lexical rather than behavioural: every global class
 named inside `src/` has to be qualified or imported, because unqualified it
 resolves inside `FreePBX\Modules\Oryk_Connect`, and the file then fatals --
@@ -442,6 +560,12 @@ catches the kind of mistake refactoring makes, before a deploy does.
   call history the same way.
 - A call recording is unlinked only when no surviving record names it, which
   costs one indexed lookup per recording.
+- A device picks up a changed PBX-wide From Domain on its next save. Changing
+  it in Advanced Settings does not rewrite the endpoints already written, and
+  there is nothing that rewrites them all at once.
+- `pjsip.endpoint_custom_post.conf` has to be writable by the web user for
+  those settings to be written. A failure is logged and the device still
+  saves, so the only sign is the log line.
 - A mailbox is not moved onto a number that already has one of its own. The
   messages are left where they are, the renumbering continues, and the reason
   is written to the FreePBX log.
