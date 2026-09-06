@@ -8,6 +8,7 @@ use BMO;
 use PDO;
 use FreePBX_Helpers;
 use FreePBX\Modules\Oryk_Devices\CdrHistory;
+use FreePBX\Modules\Oryk_Devices\DeviceManager;
 use FreePBX\Modules\Oryk_Devices\DeviceSchema;
 use FreePBX\Modules\Oryk_Devices\ExtensionManager;
 use FreePBX\Modules\Oryk_Devices\ExtensionRenumberer;
@@ -138,6 +139,13 @@ class Oryk_devices extends FreePBX_Helpers implements \BMO
 	private $schema;
 
 	/**
+	 * Creating, saving and deleting a device.
+	 *
+	 * @var DeviceManager
+	 */
+	private $devices;
+
+	/**
 	 * Create an Oryk devices module instance.
 	 *
 	 * @param object|null $freepbx FreePBX application instance.
@@ -166,6 +174,17 @@ class Oryk_devices extends FreePBX_Helpers implements \BMO
 			$this->extensions,
 			$this->voicemail,
 			$this->userman,
+			$this->ucp,
+			$this->cdr
+		);
+		$this->devices = new DeviceManager(
+			$freepbx,
+			$this->schema,
+			$this->numbers,
+			$this->renumberer,
+			$this->extensions,
+			$this->userman,
+			$this->voicemail,
 			$this->ucp,
 			$this->cdr
 		);
@@ -213,8 +232,6 @@ class Oryk_devices extends FreePBX_Helpers implements \BMO
 	 */
 	public function showPage()
 	{
-		$request = $_REQUEST;
-		$page = isset($_REQUEST['display']) ? $_REQUEST['display'] : 'default';
 		$action = isset($_REQUEST['action']) ? $_REQUEST['action'] : 'list';
 
 		switch ($action) {
@@ -237,7 +254,7 @@ class Oryk_devices extends FreePBX_Helpers implements \BMO
 				$id = isset($_REQUEST['id']) ? (int) $_REQUEST['id'] : '';
 
 				if ($id) {
-					$this->remove($id);
+					$this->devices->remove($id);
 				}
 
 				header('Location: ?display=oryk_devices');
@@ -249,7 +266,7 @@ class Oryk_devices extends FreePBX_Helpers implements \BMO
 				$submitted = $_REQUEST;
 
 				try {
-					$id = $this->store($this->schema->fields);
+					$id = $this->devices->store($submitted);
 				} catch (\Exception $e) {
 					// Nothing was written: redraw the form with what was typed
 					return load_view(__DIR__ . '/views/device.php', [
@@ -299,6 +316,48 @@ class Oryk_devices extends FreePBX_Helpers implements \BMO
 	public function syncVoicemailEmail($extension, $email)
 	{
 		return $this->voicemail->syncEmail($extension, $email);
+	}
+
+	/**
+	 * Store or update a device.
+	 *
+	 * @deprecated Use $this->devices->store($input) instead. This reads
+	 *             $_REQUEST for callers written before store() took the
+	 *             submitted form as an argument, and ignores $sets.
+	 *
+	 * @param array<string, array<string, mixed>>|null $sets Ignored.
+	 *
+	 * @return string Device identifier.
+	 */
+	public function store($sets = null)
+	{
+		return $this->devices->store($_REQUEST);
+	}
+
+	/**
+	 * Delete a device and, for kinds that own their user, its extension.
+	 *
+	 * @deprecated Use $this->devices->remove() instead.
+	 *
+	 * @param int|string $id Device identifier.
+	 *
+	 * @return bool True when a device was deleted.
+	 */
+	public function remove($id)
+	{
+		return $this->devices->remove($id);
+	}
+
+	/**
+	 * Apply the pending configuration (equivalent to `fwconsole reload`).
+	 *
+	 * @deprecated Use $this->devices->reload() instead.
+	 *
+	 * @return bool True when the reload completed successfully.
+	 */
+	public function reload()
+	{
+		return $this->devices->reload();
 	}
 
 	/**
@@ -528,236 +587,6 @@ class Oryk_devices extends FreePBX_Helpers implements \BMO
 	public function purgeCdr($extension)
 	{
 		return $this->cdr->purge($extension);
-	}
-
-	/**
-	 * Apply the pending configuration (equivalent to `fwconsole reload`).
-	 *
-	 * The Apply Config flag is raised first so it stays visible when the
-	 * reload itself fails. Failures are logged rather than thrown so a save
-	 * or delete is never lost behind a reload error.
-	 *
-	 * @return bool True when the reload completed successfully.
-	 */
-	public function reload()
-	{
-		needreload();
-
-		try {
-			$result = \FreePBX::Framework()->doReload();
-		} catch (\Throwable $e) {
-			freepbx_log(FPBX_LOG_ERROR, 'oryk_devices: reload failed: ' . $e->getMessage());
-
-			return false;
-		}
-
-		if (empty($result['status'])) {
-			freepbx_log(FPBX_LOG_ERROR, 'oryk_devices: reload failed: ' . ($result['message'] ?? 'unknown error'));
-
-			return false;
-		}
-
-		return true;
-	}
-
-	/**
-	 * Delete a device and, for kinds that own their user, the matching
-	 * user/extension.
-	 *
-	 * The user is only removed when it carries the device id and no other
-	 * device is still assigned to it.
-	 *
-	 * @param int|string $id Device identifier.
-	 *
-	 * @return bool True when a device was deleted.
-	 */
-	public function remove($id)
-	{
-		$match = \FreePBX::Core()->getDevice($id);
-		$device = isset($match['id']) ? $match : null;
-
-		if (!$device) {
-			return false;
-		}
-
-		$kind = $device['kind'] ?? $device['tech'] ?? '';
-		$type = $this->schema->types[$kind] ?? null;
-		$user = $device['user'] ?? null;
-
-		\FreePBX::Core()->delDevice($device['id']);
-
-		// An Extension/User device owns its user, so it goes with the device
-		if (!empty($type['creates_user'])
-			&& (string) $user !== ''
-			&& (string) $user === (string) $device['id']
-			&& !$this->extensions->hasDevices($user)
-		) {
-			$this->userman->removeOwnedAccount($user);
-
-			$deleted = true;
-
-			try {
-				\FreePBX::Core()->delUser($user);
-			} catch (\Exception $e) {
-				$deleted = false;
-
-				freepbx_log(FPBX_LOG_ERROR, 'oryk_devices: unable to delete user ' . $user . ': ' . $e->getMessage());
-			}
-
-			// Only once the extension has actually gone. An extension still in
-			// service, left behind because its deletion failed, must not lose
-			// the history and recordings it is still making.
-			if ($deleted) {
-				// An account belonging to a person outlives the extension, so
-				// the number comes out of what that account is allowed to open
-				$this->ucp->forget($user);
-
-				// The history outlives it too, and nothing in FreePBX clears it
-				$this->cdr->purge($user);
-			}
-		}
-
-		$this->reload();
-
-		return true;
-	}
-
-	/**
-	 * Store or update a device.
-	 *
-	 * @param array<string, array<string, mixed>> $sets Device field definitions.
-	 *
-	 * @return string Device identifier.
-	 */
-	public function store($sets)
-	{
-		$id = trim((string) ($_REQUEST['DEVICE_ID'] ?? ''));
-		$requested = trim((string) ($_REQUEST['DEVICE_USER'] ?? ''));
-		$email = $_REQUEST['DEVICE_EMAIL'] ?? null;
-		$deviceType = $_REQUEST['DEVICE_KIND'] ?? 'pjsip';
-		$type = $this->schema->types[$deviceType] ?? $this->schema->types['pjsip'];
-		$tech = $type['tech'] ?? 'pjsip';
-		$ownsUser = !empty($type['creates_user']);
-		$match = $id === '' ? [] : \FreePBX::Core()->getDevice($id);
-		$device = isset($match['id']) ? $match : null;
-		$flags = 0;
-
-		if ($ownsUser) {
-			// An Extension/User device is its own user, so the number typed
-			// into the form is the device id as well: a blank field asks for
-			// a generated one, a filled one has to be free.
-			$uid = $requested === ''
-				? $this->numbers->generate()
-				: $this->numbers->assertAvailable($requested, $id);
-
-			$user = $uid;
-		} else {
-			$uid = $id === '' ? $this->numbers->generate() : $id;
-			$user = $requested;
-		}
-
-		$description = $_REQUEST['DEVICE_DESCRIPTION'] ?? null;
-
-		$_REQUEST['DEVICE_DESCRIPTION'] = $description ? $description : $uid;
-
-		// A changed number takes the extension, the User Manager account, the
-		// mailbox and any handset pointed at it along to the new number
-		if ($ownsUser && $device && (string) $device['id'] !== (string) $uid) {
-			$this->renumberer->renumber($device['id'], $uid, $_REQUEST['DEVICE_DESCRIPTION'], $tech, $email);
-
-			$device = null; // the row on the old number is gone
-		}
-
-		$generated = \FreePBX::Core()->generateDefaultDeviceSettings(
-			$tech === 'pjsip' ? 'pjsip' : 'custom',
-			$user,
-			$_REQUEST['DEVICE_DESCRIPTION'],
-			false,
-		);
-
-		$defaults = \FreePBX::Core()->getDriver($tech)->getDefaultDeviceSettings(
-			$uid,
-			$_REQUEST['DEVICE_DESCRIPTION'],
-			$flags
-		);
-
-		unset($_REQUEST['DEVICE_ID']);
-		unset($_REQUEST['DEVICE_USER']);
-
-		foreach ($sets as $key => $set) {
-			if (isset($_REQUEST[$key])) {
-				$fieldName = $set['alias'] ?? $set['name'] ?? null;
-
-				if (!$fieldName) {
-					continue;
-				}
-
-				if (!isset($generated[$fieldName])) {
-					$generated[$fieldName] = ['value' => null];
-				}
-
-				$generated[$fieldName]['value'] = $_REQUEST[$key];
-			}
-		}
-
-		// Ensure all fields have 'value' and 'flag'
-		foreach ($generated as &$s) {
-			$s['value'] = $s['value'] ?? '';
-			$s['flag'] = $s['flag'] ?? 0;
-		}
-
-		$dial = $defaults['dial'] ?? 'DEVICE';
-
-		$generated['account']['value'] = "$uid";
-		$generated['dial']['value'] = "$dial/$uid";
-		$generated['mailbox']['value'] = "$uid@device";
-
-		if (isset($generated['emergency_cid']['value']) && empty($generated['emergency_cid']['value'])) {
-			$generated['emergency_cid']['value'] = $uid;
-		}
-
-		// Settings the type pins down are not on the form, so they are applied
-		// here on every save and win over both the driver defaults and anything
-		// that came back from the browser
-		foreach (($type['settings'] ?? []) as $keyword => $value) {
-			if (!isset($generated[$keyword])) {
-				$generated[$keyword] = ['value' => null, 'flag' => 0];
-			}
-
-			$generated[$keyword]['value'] = $value;
-		}
-
-		//die(json_encode($generated));
-
-		// Make sure the matching user exists and owns this device
-		if ($ownsUser) {
-			$generated['user']['value'] = "$uid";
-			$this->extensions->ensure($uid, $_REQUEST['DEVICE_DESCRIPTION']);
-			$this->userman->ensure($uid, $_REQUEST['DEVICE_DESCRIPTION'], $tech, $email);
-
-			// Keep the names and the email in step with the form on every save
-			$this->extensions->syncName($uid, $_REQUEST['DEVICE_DESCRIPTION']);
-			$this->userman->sync($uid, $_REQUEST['DEVICE_DESCRIPTION'], $email);
-			$this->voicemail->syncEmail($uid, $email);
-		}
-
-		// If device exists, delete it first
-		if ($device) {
-			\FreePBX::Core()->delDevice($device['id'], true);
-		}
-
-		$ret = \FreePBX::Core()->addDevice($uid, $tech, $generated, true);
-
-		//update the associated endpoint configuration
-		if ($ret && $tech === 'pjsip') {
-			\FreePBX::Core()->processEPM($uid, $tech, true);
-		}
-
-		if ($ret) {
-			$this->reload();
-		}
-
-		return $uid;
 	}
 
 	/**
