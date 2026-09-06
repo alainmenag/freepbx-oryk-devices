@@ -16,14 +16,26 @@ require_once __DIR__ . '/drivers/Rtsp.class.php';
 
 class Oryk_devices extends FreePBX_Helpers implements \BMO
 {
+	/**
+	 * Database table used by this module.
+	 *
+	 * @var string
+	 */
 	private $table = 'oryk_devices_settings';
 
+	/**
+	 * Supported device types and their configuration definitions.
+	 *
+	 * @var array<string, array<string, mixed>>
+	 */
 	public $types = [
 		'pjsip' => [
 			'title' => 'Extension/User',
 			'icon' => 'fa-phone',
 			'suffix' => '',
 			'tech' => 'pjsip',
+			// The device is the extension: a user with the same id is created and linked.
+			'creates_user' => true,
 			'fields' => ['DEVICE_USER', 'HEADER_CREDENTIALS', 'DEVICE_ACCOUNT', 'DEVICE_SECRET'],
 		],
 		'handset' => [
@@ -55,6 +67,11 @@ class Oryk_devices extends FreePBX_Helpers implements \BMO
 		],
 	];
 
+	/**
+	 * Available field groups.
+	 *
+	 * @var array<string, array<string, string>>
+	 */
 	public $groups = [
 		'basics' => [
 			'title' => 'Basics',
@@ -70,6 +87,11 @@ class Oryk_devices extends FreePBX_Helpers implements \BMO
 		],
 	];
 
+	/**
+	 * Device field definitions.
+	 *
+	 * @var array<string, array<string, mixed>>
+	 */
 	public $fields = [
 		'HEADER_CREDENTIALS' => [
 			'html' => '<h2>Credentials</h2>',
@@ -173,6 +195,13 @@ class Oryk_devices extends FreePBX_Helpers implements \BMO
 		],
 	];
 
+	/**
+	 * Create an Oryk devices module instance.
+	 *
+	 * @param object|null $freepbx FreePBX application instance.
+	 *
+	 * @throws \Exception If no FreePBX instance is provided.
+	 */
 	public function __construct($freepbx = null)
 	{
 		if ($freepbx == null) {
@@ -186,6 +215,14 @@ class Oryk_devices extends FreePBX_Helpers implements \BMO
 		$this->tryRegisterDriver();
 	}
 
+	/**
+	 * Register the RTSP driver with the Core module.
+	 *
+	 * Registration failures are intentionally ignored so module loading can
+	 * continue when the Core module is not ready.
+	 *
+	 * @return void
+	 */
 	private function tryRegisterDriver()
 	{
 		try {
@@ -211,6 +248,11 @@ class Oryk_devices extends FreePBX_Helpers implements \BMO
 		}
 	}
 
+	/**
+	 * Render the requested module page.
+	 *
+	 * @return mixed Rendered page output or a redirect response.
+	 */
 	public function showPage()
 	{
 		$request = $_REQUEST;
@@ -237,7 +279,7 @@ class Oryk_devices extends FreePBX_Helpers implements \BMO
 				$id = isset($_REQUEST['id']) ? (int) $_REQUEST['id'] : '';
 
 				if ($id) {
-					\FreePBX::Core()->delDevice($id);
+					$this->remove($id);
 				}
 
 				header('Location: ?display=oryk_devices');
@@ -261,6 +303,11 @@ class Oryk_devices extends FreePBX_Helpers implements \BMO
 		}
 	}
 
+	/**
+	 * Generate a unique numeric device identifier.
+	 *
+	 * @return string Ten-digit device identifier.
+	 */
 	public function generateNumber()
 	{
 		$ms = round(microtime(true) * 1000);
@@ -269,6 +316,157 @@ class Oryk_devices extends FreePBX_Helpers implements \BMO
 		return '99' . substr($ms, -4) . $rand; // total = 2 + 4 + 4 = 10 digits
 	}
 
+	/**
+	 * Apply the pending configuration (equivalent to `fwconsole reload`).
+	 *
+	 * The Apply Config flag is raised first so it stays visible when the
+	 * reload itself fails. Failures are logged rather than thrown so a save
+	 * or delete is never lost behind a reload error.
+	 *
+	 * @return bool True when the reload completed successfully.
+	 */
+	public function reload()
+	{
+		needreload();
+
+		try {
+			$result = \FreePBX::Framework()->doReload();
+		} catch (\Throwable $e) {
+			freepbx_log(FPBX_LOG_ERROR, 'oryk_devices: reload failed: ' . $e->getMessage());
+
+			return false;
+		}
+
+		if (empty($result['status'])) {
+			freepbx_log(FPBX_LOG_ERROR, 'oryk_devices: reload failed: ' . ($result['message'] ?? 'unknown error'));
+
+			return false;
+		}
+
+		return true;
+	}
+
+	/**
+	 * Determine whether a user/extension already exists.
+	 *
+	 * @param int|string $extension Extension/user number.
+	 *
+	 * @return bool True when the user is present in the users table.
+	 */
+	private function hasUser($extension)
+	{
+		$sth = $this->db->prepare('SELECT extension FROM users WHERE extension = ? LIMIT 1');
+		$sth->execute([$extension]);
+
+		return (bool) $sth->fetchColumn();
+	}
+
+	/**
+	 * Determine whether any device is still assigned to a user/extension.
+	 *
+	 * @param int|string $user Extension/user number.
+	 *
+	 * @return bool True when at least one device references the user.
+	 */
+	private function userHasDevices($user)
+	{
+		$sth = $this->db->prepare('SELECT id FROM devices WHERE user = ? LIMIT 1');
+		$sth->execute([$user]);
+
+		return (bool) $sth->fetchColumn();
+	}
+
+	/**
+	 * Make sure a user/extension exists for the given id.
+	 *
+	 * Device kinds flagged with `creates_user` are their own user, so the
+	 * matching row in the FreePBX users table is created when it is missing.
+	 *
+	 * @param int|string  $extension   Extension/user number.
+	 * @param string|null $displayname Display name used for a new user.
+	 *
+	 * @return bool True when the user exists after the call.
+	 */
+	public function ensureUser($extension, $displayname = null)
+	{
+		if (trim((string) $extension) === '') {
+			return false;
+		}
+
+		if ($this->hasUser($extension)) {
+			return true;
+		}
+
+		$settings = \FreePBX::Core()->generateDefaultUserSettings(
+			$extension,
+			($displayname === null || $displayname === '') ? (string) $extension : $displayname
+		);
+
+		// Link the user to the device carrying the same id.
+		$settings['device'] = (string) $extension;
+
+		try {
+			\FreePBX::Core()->addUser($extension, $settings);
+		} catch (\Exception $e) {
+			freepbx_log(FPBX_LOG_ERROR, 'oryk_devices: unable to create user ' . $extension . ': ' . $e->getMessage());
+
+			return false;
+		}
+
+		return true;
+	}
+
+	/**
+	 * Delete a device and, for kinds that own their user, the matching
+	 * user/extension.
+	 *
+	 * The user is only removed when it carries the device id and no other
+	 * device is still assigned to it.
+	 *
+	 * @param int|string $id Device identifier.
+	 *
+	 * @return bool True when a device was deleted.
+	 */
+	public function remove($id)
+	{
+		$match = \FreePBX::Core()->getDevice($id);
+		$device = isset($match['id']) ? $match : null;
+
+		if (!$device) {
+			return false;
+		}
+
+		$kind = $device['kind'] ?? $device['tech'] ?? '';
+		$type = $this->types[$kind] ?? null;
+		$user = $device['user'] ?? null;
+
+		\FreePBX::Core()->delDevice($device['id']);
+
+		// An Extension/User device owns its user, so it goes with the device
+		if (!empty($type['creates_user'])
+			&& (string) $user !== ''
+			&& (string) $user === (string) $device['id']
+			&& !$this->userHasDevices($user)
+		) {
+			try {
+				\FreePBX::Core()->delUser($user);
+			} catch (\Exception $e) {
+				freepbx_log(FPBX_LOG_ERROR, 'oryk_devices: unable to delete user ' . $user . ': ' . $e->getMessage());
+			}
+		}
+
+		$this->reload();
+
+		return true;
+	}
+
+	/**
+	 * Store or update a device.
+	 *
+	 * @param array<string, array<string, mixed>> $sets Device field definitions.
+	 *
+	 * @return string Device identifier.
+	 */
 	public function store($sets)
 	{
 		$id = $_REQUEST['DEVICE_ID'] ?? null;
@@ -282,6 +480,11 @@ class Oryk_devices extends FreePBX_Helpers implements \BMO
 		//$gid = (round(microtime(true) * 1000)); // Generate temporary ID
 		$gid = $this->generateNumber();
 		$uid = $id ? $id : $gid;
+
+		// An Extension/User device is its own user, whatever the form supplied.
+		if (!empty($type['creates_user'])) {
+			$user = $uid;
+		}
 
 		$description = $_REQUEST['DEVICE_DESCRIPTION'] ?? null;
 
@@ -337,6 +540,12 @@ class Oryk_devices extends FreePBX_Helpers implements \BMO
 
 		//die(json_encode($generated));
 
+		// Make sure the matching user exists and owns this device
+		if (!empty($type['creates_user'])) {
+			$generated['user']['value'] = "$uid";
+			$this->ensureUser($uid, $_REQUEST['DEVICE_DESCRIPTION']);
+		}
+
 		// If device exists, delete it first
 		if ($device) {
 			\FreePBX::Core()->delDevice($device['id'], true);
@@ -347,12 +556,22 @@ class Oryk_devices extends FreePBX_Helpers implements \BMO
 		//update the associated endpoint configuration
 		if ($ret && $tech === 'pjsip') {
 			\FreePBX::Core()->processEPM($uid, $tech, true);
-			needreload();
+		}
+
+		if ($ret) {
+			$this->reload();
 		}
 
 		return $uid;
 	}
 
+	/**
+	 * Load a device and map its values to the configured fields.
+	 *
+	 * @param int|string|null $id Device identifier.
+	 *
+	 * @return array<string, mixed> Device data grouped by field group.
+	 */
 	public function pull($id)
 	{
 		$base = [
@@ -398,7 +617,11 @@ class Oryk_devices extends FreePBX_Helpers implements \BMO
 		return $base;
 	}
 
-	//Install method. use this or install.php using both may cause weird behavior
+	/**
+	 * Install the module.
+	 *
+	 * @return bool True when installation completes.
+	 */
 	public function install()
 	{
 		try {
@@ -413,26 +636,54 @@ class Oryk_devices extends FreePBX_Helpers implements \BMO
 		return true;
 	}
 
-	//Uninstall method. use this or install.php using both may cause weird behavior
+	/**
+	 * Uninstall the module.
+	 *
+	 * @return void
+	 */
 	public function uninstall()
 	{
 	}
 
-	//Not yet implemented
+	/**
+	 * Create a module backup.
+	 *
+	 * @return void
+	 */
 	public function backup()
 	{
 	}
 
-	//not yet implimented
+	/**
+	 * Restore module data from a backup.
+	 *
+	 * @param mixed $backup Backup data.
+	 *
+	 * @return void
+	 */
 	public function restore($backup)
 	{
 	}
 
-	//process form
+	/**
+	 * Initialise the module configuration page.
+	 *
+	 * @param string $page Current configuration page.
+	 *
+	 * @return void
+	 */
 	public function doConfigPageInit($page)
 	{
 	}
 
+	/**
+	 * Determine whether an AJAX request is supported.
+	 *
+	 * @param string $req Requested AJAX operation.
+	 * @param mixed &$setting Request settings passed by reference.
+	 *
+	 * @return bool True when the request is supported.
+	 */
 	public function ajaxRequest($req, &$setting)
 	{
 		// tell FreePBX you handle AJAX requests
@@ -446,6 +697,11 @@ class Oryk_devices extends FreePBX_Helpers implements \BMO
 		}
 	}
 
+	/**
+	 * Process an AJAX request.
+	 *
+	 * @return array<string, mixed>|null AJAX response data.
+	 */
 	public function ajaxHandler()
 	{
 		switch ($_REQUEST['command']) {
@@ -483,27 +739,6 @@ class Oryk_devices extends FreePBX_Helpers implements \BMO
 				$countStmt->execute($params);
 				$total = (int) $countStmt->fetchColumn();
 
-				// Combine FreePBX and Oryk devices
-				// $sql = "
-				// SELECT 
-				// d.id,
-				// d.description,
-				// d.user,
-				// d.tech,
-				// COALESCE(k.data, d.tech) AS kind,
-				// CONCAT('{', GROUP_CONCAT(CONCAT('\"', s.keyword, '\":\"', s.data, '\"')), '}') AS settings
-				// FROM devices d
-				// LEFT JOIN asterisk.sip k 
-				// ON k.id = d.id 
-				// AND k.keyword = 'kind'
-				// LEFT JOIN asterisk.sip s 
-				// ON s.id = d.id
-				// /** search filter */
-				// $where
-				// GROUP BY d.id
-				// ORDER BY $sort $order
-				// LIMIT :limit OFFSET :offset;
-				// ";
 				$sql = "
 					SELECT 
 					d.id,
@@ -528,12 +763,6 @@ class Oryk_devices extends FreePBX_Helpers implements \BMO
 
 				$rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
-				// Loop through rows to decode settings JSON
-				// foreach ($rows as &$row) {
-				// 	$settingsJson = $row['settings'] ?? '{}';
-				// 	$row['settings'] = json_decode($settingsJson, true) ?: [];
-				// }
-
 				return [
 					'total' => $total,
 					'rows' => $rows
@@ -544,6 +773,13 @@ class Oryk_devices extends FreePBX_Helpers implements \BMO
 		}
 	}
 
+	/**
+	 * Return action-bar buttons for the current page.
+	 *
+	 * @param array<string, mixed> $request Current request data.
+	*
+	 * @return array<string, array<string, string>> Action-bar button definitions.
+	 */
 	public function getActionBar($request)
 	{
 		$action = isset($_REQUEST['action']) ? $_REQUEST['action'] : 'list';
