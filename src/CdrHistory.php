@@ -51,6 +51,46 @@ class CdrHistory extends Service
 	}
 
 	/**
+	 * Open the CDR database for a job that will take a while.
+	 *
+	 * Both of the operations here begin the same way, and the reason is the
+	 * same for both: the CDR module keeps its own database handle, which may
+	 * be a different server from the one everything else uses, and the site
+	 * may not have the module at all.
+	 *
+	 * The time limit goes with it. Of the columns these statements match on
+	 * only dst and dstchannel are indexed, so on a system with a long history
+	 * they read the table end to end. Being cut off half way through leaves
+	 * the history in a worse state than either finishing or never starting --
+	 * split across two numbers, or half deleted -- so this is allowed to take
+	 * as long as it takes.
+	 *
+	 * @param string $doing What is about to be done, for the log.
+	 *
+	 * @return object|null The handle, or null when there is none to be had.
+	 */
+	private function handle($doing)
+	{
+		if (!$this->moduleActive('cdr')) {
+			return null;
+		}
+
+		try {
+			$cdrdb = \FreePBX::Cdr()->getCdrDbHandle();
+		} catch (\Exception $e) {
+			$this->logError('no CDR database to ' . $doing . ': ' . $e->getMessage());
+
+			return null;
+		}
+
+		if (function_exists('set_time_limit')) {
+			@set_time_limit(0);
+		}
+
+		return $cdrdb;
+	}
+
+	/**
 	 * Carry the call history over to a new extension number.
 	 *
 	 * Nothing in FreePBX does this. A call detail record keeps the number as
@@ -72,24 +112,10 @@ class CdrHistory extends Service
 	 */
 	public function migrate($old, $new)
 	{
-		if (!$this->moduleActive('cdr')) {
+		$cdrdb = $this->handle('move ' . $old . ' in');
+
+		if ($cdrdb === null) {
 			return 0;
-		}
-
-		try {
-			$cdrdb = \FreePBX::Cdr()->getCdrDbHandle();
-		} catch (\Exception $e) {
-			$this->logError('no CDR database to move ' . $old . ' in: ' . $e->getMessage());
-
-			return 0;
-		}
-
-		// Of the columns being rewritten only dst and dstchannel are indexed,
-		// so on a system with a long history these statements read the table
-		// end to end. A move that is cut short half way through leaves the
-		// history split across two numbers, so it is allowed to take its time.
-		if (function_exists('set_time_limit')) {
-			@set_time_limit(0);
 		}
 
 		$rows = 0;
@@ -259,22 +285,10 @@ class CdrHistory extends Service
 			return $removed;
 		}
 
-		if (!$this->moduleActive('cdr')) {
+		$cdrdb = $this->handle('purge ' . $extension . ' from');
+
+		if ($cdrdb === null) {
 			return $removed;
-		}
-
-		try {
-			$cdrdb = \FreePBX::Cdr()->getCdrDbHandle();
-		} catch (\Exception $e) {
-			$this->logError('no CDR database to purge ' . $extension . ' from: ' . $e->getMessage());
-
-			return $removed;
-		}
-
-		// None of the matched columns is indexed, so on a system with a long
-		// history this reads the table end to end
-		if (function_exists('set_time_limit')) {
-			@set_time_limit(0);
 		}
 
 		$tables = $this->tables($cdrdb);
