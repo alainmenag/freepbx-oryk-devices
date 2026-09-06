@@ -14,6 +14,35 @@ if (!class_exists('FreePBX\\Modules\\Core\\Driver', false)) {
 
 require_once __DIR__ . '/drivers/Rtsp.class.php';
 
+// The subsystems this module is made of live in src/ and are loaded as they
+// are asked for. BMO autoloads the module class itself, by rawname, and
+// nothing else, so anything standing alongside it has to say where it lives.
+// The driver is left out: it is required above, before the Core class it
+// extends can go missing, and that order is worth keeping deliberate.
+if (!defined('ORYK_DEVICES_AUTOLOADER')) {
+	define('ORYK_DEVICES_AUTOLOADER', true);
+
+	spl_autoload_register(function ($class) {
+		$prefix = 'FreePBX\\Modules\\Oryk_Devices\\';
+
+		if (strpos($class, $prefix) !== 0) {
+			return;
+		}
+
+		$relative = substr($class, strlen($prefix));
+
+		if (strpos($relative, 'Drivers\\') === 0) {
+			return;
+		}
+
+		$file = __DIR__ . '/src/' . str_replace('\\', '/', $relative) . '.php';
+
+		if (is_file($file)) {
+			require_once $file;
+		}
+	});
+}
+
 class Oryk_devices extends FreePBX_Helpers implements \BMO
 {
 	/**
