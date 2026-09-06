@@ -51,6 +51,31 @@ class UsermanManager extends Service
 	}
 
 	/**
+	 * The account this module owns for an extension, if it owns one.
+	 *
+	 * An account named after the extension was created here, and is this
+	 * module's to rename and to delete. An account that merely has the
+	 * extension assigned to it belongs to a person who linked it by hand,
+	 * and is not: it outlives the extension and only ever loses the
+	 * assignment. Everything that writes asks this first.
+	 *
+	 * @param int|string $extension Extension/user number.
+	 *
+	 * @return array<string, mixed>|null The account, or null when this
+	 *                                   module owns none for the extension.
+	 */
+	public function ownedAccount($extension)
+	{
+		$user = $this->findByExtension($extension);
+
+		if (empty($user['id']) || (string) $user['username'] !== (string) $extension) {
+			return null;
+		}
+
+		return $user;
+	}
+
+	/**
 	 * Make sure a User Manager account exists for the given extension.
 	 *
 	 * This uses the same entry point as the FreePBX extension screen
@@ -116,10 +141,11 @@ class UsermanManager extends Service
 
 		try {
 			$userman = \FreePBX::Userman();
-			$user = $this->findByExtension($extension);
 
 			// Never rename an account a person linked to this extension by hand
-			if (empty($user['id']) || (string) $user['username'] !== (string) $extension) {
+			$user = $this->ownedAccount($extension);
+
+			if ($user === null) {
 				return false;
 			}
 
@@ -237,9 +263,9 @@ class UsermanManager extends Service
 
 		try {
 			$userman = \FreePBX::Userman();
-			$user = $this->findByExtension($extension);
+			$user = $this->ownedAccount($extension);
 
-			if (empty($user['id']) || (string) $user['username'] !== (string) $extension) {
+			if ($user === null) {
 				return false;
 			}
 
