@@ -8,6 +8,7 @@ use BMO;
 use PDO;
 use FreePBX_Helpers;
 use FreePBX\Modules\Oryk_Devices\CdrHistory;
+use FreePBX\Modules\Oryk_Devices\UsermanManager;
 use FreePBX\Modules\Oryk_Devices\VoicemailManager;
 
 if (!class_exists('FreePBX\\Modules\\Core\\Driver', false)) {
@@ -88,6 +89,13 @@ class Oryk_devices extends FreePBX_Helpers implements \BMO
 	 * @var CdrHistory
 	 */
 	private $cdr;
+
+	/**
+	 * The User Manager account behind an Extension/User device.
+	 *
+	 * @var UsermanManager
+	 */
+	private $userman;
 
 	/**
 	 * Prefix every generated device id starts with.
@@ -304,6 +312,7 @@ class Oryk_devices extends FreePBX_Helpers implements \BMO
 
 		$this->voicemail = new VoicemailManager($freepbx);
 		$this->cdr = new CdrHistory($freepbx, $this->voicemail);
+		$this->userman = new UsermanManager($freepbx);
 
 		$this->tryRegisterDriver();
 	}
@@ -529,7 +538,7 @@ class Oryk_devices extends FreePBX_Helpers implements \BMO
 			);
 		}
 
-		$account = $this->findUsermanUser($number);
+		$account = $this->userman->findByExtension($number);
 
 		if ($account) {
 			return sprintf(
@@ -540,37 +549,6 @@ class Oryk_devices extends FreePBX_Helpers implements \BMO
 		}
 
 		return null;
-	}
-
-	/**
-	 * Look up the User Manager account tied to an extension.
-	 *
-	 * An account named after the extension is preferred over one that merely
-	 * has the extension assigned to it, so the caller can tell the account
-	 * this module owns from a person's account linked by hand.
-	 *
-	 * @param int|string $extension Extension/user number.
-	 *
-	 * @return array<string, mixed>|null The account, or null when there is none.
-	 */
-	private function findUsermanUser($extension)
-	{
-		if (trim((string) $extension) === '' || !$this->FreePBX->Modules->checkStatus('userman')) {
-			return null;
-		}
-
-		try {
-			$userman = \FreePBX::Userman();
-			$user = $userman->getUserByUsername($extension);
-
-			if (empty($user['id'])) {
-				$user = $userman->getUserByDefaultExtension($extension);
-			}
-		} catch (\Exception $e) {
-			return null;
-		}
-
-		return empty($user['id']) ? null : $user;
 	}
 
 	/**
@@ -618,7 +596,7 @@ class Oryk_devices extends FreePBX_Helpers implements \BMO
 			}
 		}
 
-		$account = $this->findUsermanUser($old);
+		$account = $this->userman->findByExtension($old);
 
 		// Carry the extension's own settings over when they could be read
 		if (!empty($settings['extension'])) {
@@ -691,7 +669,7 @@ class Oryk_devices extends FreePBX_Helpers implements \BMO
 
 		// After the old extension is gone, so User Manager is not left
 		// unassigning the extension it has just been pointed at
-		$this->moveUsermanUser($account, $old, $new, $displayname, $tech, $email);
+		$this->userman->move($account, $old, $new, $displayname, $tech, $email);
 
 		// Handsets and softphones registered against the old extension follow it
 		$this->repointDevices($old, $new);
@@ -702,68 +680,6 @@ class Oryk_devices extends FreePBX_Helpers implements \BMO
 		// The call history keeps the number as it stood when the call was
 		// placed, and no part of FreePBX moves it
 		$this->cdr->migrate($old, $new);
-
-		return true;
-	}
-
-	/**
-	 * Carry a User Manager account over to a new extension.
-	 *
-	 * The account is updated rather than replaced, so its password, groups,
-	 * UCP settings and login history survive the renumbering. An account
-	 * named after the old extension is this module's own and is renamed with
-	 * it; one that merely has the extension assigned belongs to a person, so
-	 * only the assignment follows.
-	 *
-	 * @param array<string, mixed>|null $account     Account on the old number.
-	 * @param int|string                $old         Number being left behind.
-	 * @param int|string                $new         Number being moved to.
-	 * @param string                    $displayname Display name to store.
-	 * @param string                    $tech        Device technology.
-	 * @param string|null               $email       Email address for the account.
-	 *
-	 * @return bool True when an account is on the new number afterwards.
-	 */
-	public function moveUsermanUser($account, $old, $new, $displayname, $tech = 'pjsip', $email = null)
-	{
-		if (!$this->FreePBX->Modules->checkStatus('userman')) {
-			return false;
-		}
-
-		// Nothing to carry over: the new number gets a fresh account
-		if (empty($account['id'])) {
-			$this->ensureUsermanUser($new, $displayname, $tech, $email);
-
-			return $this->syncUsermanUser($new, $displayname, $email);
-		}
-
-		$username = ((string) $account['username'] === (string) $old) ? (string) $new : $account['username'];
-		$extraData = ['displayname' => $displayname];
-
-		if ($email !== null) {
-			$extraData['email'] = $email;
-		}
-
-		try {
-			$status = \FreePBX::Userman()->updateUser(
-				$account['id'],
-				$account['username'],
-				$username,
-				(string) $new,
-				$account['description'] ?? null,
-				$extraData,
-				null,
-				true
-			);
-
-			if (is_array($status) && isset($status['status']) && !$status['status']) {
-				throw new \Exception(trim(strip_tags((string) ($status['message'] ?? ''))));
-			}
-		} catch (\Exception $e) {
-			freepbx_log(FPBX_LOG_ERROR, 'oryk_devices: unable to move userman user ' . $old . ' to ' . $new . ': ' . $e->getMessage());
-
-			return false;
-		}
 
 		return true;
 	}
@@ -796,6 +712,72 @@ class Oryk_devices extends FreePBX_Helpers implements \BMO
 	public function syncVoicemailEmail($extension, $email)
 	{
 		return $this->voicemail->syncEmail($extension, $email);
+	}
+
+	/**
+	 * Carry a User Manager account over to a new extension.
+	 *
+	 * @deprecated Use $this->userman->move() instead.
+	 *
+	 * @param array<string, mixed>|null $account     Account on the old number.
+	 * @param int|string                $old         Number being left behind.
+	 * @param int|string                $new         Number being moved to.
+	 * @param string                    $displayname Display name to store.
+	 * @param string                    $tech        Device technology.
+	 * @param string|null               $email       Email address for the account.
+	 *
+	 * @return bool True when an account is on the new number afterwards.
+	 */
+	public function moveUsermanUser($account, $old, $new, $displayname, $tech = 'pjsip', $email = null)
+	{
+		return $this->userman->move($account, $old, $new, $displayname, $tech, $email);
+	}
+
+	/**
+	 * Make sure a User Manager account exists for the given extension.
+	 *
+	 * @deprecated Use $this->userman->ensure() instead.
+	 *
+	 * @param int|string  $extension   Extension/user number.
+	 * @param string|null $displayname Display name for a new account.
+	 * @param string      $tech        Device technology.
+	 * @param string|null $email       Email address for the account.
+	 *
+	 * @return bool True when the account exists after the call.
+	 */
+	public function ensureUsermanUser($extension, $displayname = null, $tech = 'pjsip', $email = null)
+	{
+		return $this->userman->ensure($extension, $displayname, $tech, $email);
+	}
+
+	/**
+	 * Keep the User Manager display name in step with the device description.
+	 *
+	 * @deprecated Use $this->userman->sync() instead.
+	 *
+	 * @param int|string  $extension   Extension/user number.
+	 * @param string      $displayname Display name to store.
+	 * @param string|null $email       Email to store, null to leave it alone.
+	 *
+	 * @return bool True when the account was updated.
+	 */
+	public function syncUsermanUser($extension, $displayname, $email = null)
+	{
+		return $this->userman->sync($extension, $displayname, $email);
+	}
+
+	/**
+	 * Delete the User Manager account belonging to an extension.
+	 *
+	 * @deprecated Use $this->userman->removeOwnedAccount() instead.
+	 *
+	 * @param int|string $extension Extension/user number.
+	 *
+	 * @return bool True when an account was deleted.
+	 */
+	public function removeUsermanUser($extension)
+	{
+		return $this->userman->removeOwnedAccount($extension);
 	}
 
 	/**
@@ -1171,147 +1153,6 @@ class Oryk_devices extends FreePBX_Helpers implements \BMO
 	}
 
 	/**
-	 * Make sure a User Manager account exists for the given extension.
-	 *
-	 * This uses the same entry point as the FreePBX extension screen
-	 * (Userman::processQuickCreate), so the account lands in the default
-	 * directory, gets the extension assigned, and picks up the configured
-	 * groups, UCP template and welcome email.
-	 *
-	 * @param int|string  $extension   Extension/user number.
-	 * @param string|null $displayname Display name for a new account.
-	 * @param string      $tech        Device technology.
-	 * @param string|null $email       Email address for the account.
-	 *
-	 * @return bool True when the account exists after the call.
-	 */
-	public function ensureUsermanUser($extension, $displayname = null, $tech = 'pjsip', $email = null)
-	{
-		if (!$this->FreePBX->Modules->checkStatus('userman')) {
-			return false;
-		}
-
-		if ($this->findUsermanUser($extension)) {
-			return true;
-		}
-
-		try {
-			$userman = \FreePBX::Userman();
-
-			$userman->processQuickCreate($tech, $extension, [
-				'um' => 'yes',
-				'name' => ($displayname === null || $displayname === '') ? (string) $extension : $displayname,
-				'email' => (string) $email,
-				'um-groups' => [],
-			]);
-		} catch (\Exception $e) {
-			freepbx_log(FPBX_LOG_ERROR, 'oryk_devices: unable to create userman user ' . $extension . ': ' . $e->getMessage());
-
-			return false;
-		}
-
-		$created = $userman->getUserByUsername($extension);
-
-		return !empty($created['id']);
-	}
-
-	/**
-	 * Keep the User Manager display name in step with the device description.
-	 *
-	 * Only an account whose username matches the extension is touched, and
-	 * only its display name: every field left out of the update is carried
-	 * over by User Manager, so email, groups and the rest survive.
-	 *
-	 * @param int|string  $extension   Extension/user number.
-	 * @param string      $displayname Display name to store.
-	 * @param string|null $email       Email to store, null to leave it alone.
-	 *
-	 * @return bool True when the account was updated.
-	 */
-	public function syncUsermanUser($extension, $displayname, $email = null)
-	{
-		if (!$this->FreePBX->Modules->checkStatus('userman')) {
-			return false;
-		}
-
-		try {
-			$userman = \FreePBX::Userman();
-			$user = $this->findUsermanUser($extension);
-
-			// Never rename an account a person linked to this extension by hand
-			if (empty($user['id']) || (string) $user['username'] !== (string) $extension) {
-				return false;
-			}
-
-			$extraData = ['displayname' => $displayname];
-
-			// A supplied email is written through, including a blank one to clear it
-			if ($email !== null) {
-				$extraData['email'] = $email;
-			}
-
-			$sameName = (string) ($user['displayname'] ?? '') === (string) $displayname;
-			$sameEmail = $email === null || (string) ($user['email'] ?? '') === (string) $email;
-
-			if ($sameName && $sameEmail) {
-				return true;
-			}
-
-			$userman->updateUser(
-				$user['id'],
-				$user['username'],
-				$user['username'],
-				$user['default_extension'] ?? $extension,
-				$user['description'] ?? null,
-				$extraData,
-				null,
-				true
-			);
-		} catch (\Exception $e) {
-			freepbx_log(FPBX_LOG_ERROR, 'oryk_devices: unable to update userman user ' . $extension . ': ' . $e->getMessage());
-
-			return false;
-		}
-
-		return true;
-	}
-
-	/**
-	 * Delete the User Manager account belonging to an extension.
-	 *
-	 * Only an account whose username matches the extension is removed, so an
-	 * account that merely has the extension assigned to it (a real person
-	 * linked by hand) is left alone.
-	 *
-	 * @param int|string $extension Extension/user number.
-	 *
-	 * @return bool True when an account was deleted.
-	 */
-	public function removeUsermanUser($extension)
-	{
-		if (!$this->FreePBX->Modules->checkStatus('userman')) {
-			return false;
-		}
-
-		try {
-			$userman = \FreePBX::Userman();
-			$user = $this->findUsermanUser($extension);
-
-			if (empty($user['id']) || (string) $user['username'] !== (string) $extension) {
-				return false;
-			}
-
-			$userman->deleteUserByID($user['id']);
-		} catch (\Exception $e) {
-			freepbx_log(FPBX_LOG_ERROR, 'oryk_devices: unable to delete userman user ' . $extension . ': ' . $e->getMessage());
-
-			return false;
-		}
-
-		return true;
-	}
-
-	/**
 	 * Delete a device and, for kinds that own their user, the matching
 	 * user/extension.
 	 *
@@ -1343,7 +1184,7 @@ class Oryk_devices extends FreePBX_Helpers implements \BMO
 			&& (string) $user === (string) $device['id']
 			&& !$this->userHasDevices($user)
 		) {
-			$this->removeUsermanUser($user);
+			$this->userman->removeOwnedAccount($user);
 
 			$deleted = true;
 
@@ -1484,11 +1325,11 @@ class Oryk_devices extends FreePBX_Helpers implements \BMO
 		if ($ownsUser) {
 			$generated['user']['value'] = "$uid";
 			$this->ensureUser($uid, $_REQUEST['DEVICE_DESCRIPTION']);
-			$this->ensureUsermanUser($uid, $_REQUEST['DEVICE_DESCRIPTION'], $tech, $email);
+			$this->userman->ensure($uid, $_REQUEST['DEVICE_DESCRIPTION'], $tech, $email);
 
 			// Keep the names and the email in step with the form on every save
 			$this->syncUserName($uid, $_REQUEST['DEVICE_DESCRIPTION']);
-			$this->syncUsermanUser($uid, $_REQUEST['DEVICE_DESCRIPTION'], $email);
+			$this->userman->sync($uid, $_REQUEST['DEVICE_DESCRIPTION'], $email);
 			$this->voicemail->syncEmail($uid, $email);
 		}
 
