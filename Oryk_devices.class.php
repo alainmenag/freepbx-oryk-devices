@@ -24,6 +24,34 @@ class Oryk_devices extends FreePBX_Helpers implements \BMO
 	private $table = 'oryk_devices_settings';
 
 	/**
+	 * FreePBX application instance.
+	 *
+	 * @var object
+	 */
+	public $FreePBX;
+
+	/**
+	 * Asterisk database handle.
+	 *
+	 * @var \PDO
+	 */
+	public $db;
+
+	/**
+	 * Asterisk manager connection, when one is available.
+	 *
+	 * @var object|null
+	 */
+	public $astman;
+
+	/**
+	 * Columns of each CDR table, as they were read this request.
+	 *
+	 * @var array<string, array<int, string>>
+	 */
+	private $cdrColumns = [];
+
+	/**
 	 * Prefix every generated device id starts with.
 	 */
 	const NUMBER_PREFIX = '999';
@@ -226,17 +254,10 @@ class Oryk_devices extends FreePBX_Helpers implements \BMO
 	 *
 	 * @throws \Exception If no FreePBX instance is provided.
 	 */
-	/**
-	 * Columns of each CDR table, as they were read this request.
-	 *
-	 * @var array<string, array<int, string>>
-	 */
-	private $cdrColumns = [];
-
 	public function __construct($freepbx = null)
 	{
 		if ($freepbx == null) {
-			throw new Exception("Not given a FreePBX Object");
+			throw new \Exception('Not given a FreePBX Object');
 		}
 
 		$this->FreePBX = $freepbx;
@@ -2584,8 +2605,20 @@ class Oryk_devices extends FreePBX_Helpers implements \BMO
 				$limit = $_REQUEST['limit'] ?? 10;
 				$offset = $_REQUEST['offset'] ?? 0;
 				$search = $_REQUEST['search'] ?? '';
-				$sort = $_REQUEST['sort'] ?? 'user';
-				$order = $_REQUEST['order'] ?? 'asc';
+				// The sort column and its direction are written into the
+				// statement rather than bound, so neither can be taken from
+				// the request as it stands. Only what the table offers as a
+				// sortable heading is accepted, and anything else sorts by
+				// extension rather than being refused.
+				$sortable = [
+					'user' => 'd.user',
+					'description' => 'd.description',
+					'kind' => 'kind',
+					'id' => 'd.id',
+				];
+
+				$sort = $sortable[(string) ($_REQUEST['sort'] ?? '')] ?? $sortable['user'];
+				$order = strtolower((string) ($_REQUEST['order'] ?? '')) === 'desc' ? 'DESC' : 'ASC';
 
 				$params = [];
 				$where = '';
@@ -2605,6 +2638,9 @@ class Oryk_devices extends FreePBX_Helpers implements \BMO
 				$countStmt->execute($params);
 				$total = (int) $countStmt->fetchColumn();
 
+				// devices.id is unique (install() adds the key), so the
+				// server can see description and user are decided by it and
+				// ONLY_FULL_GROUP_BY is satisfied
 				$sql = "
 					SELECT 
 					d.id,
@@ -2613,7 +2649,7 @@ class Oryk_devices extends FreePBX_Helpers implements \BMO
 					MAX(CASE WHEN s.keyword = 'link'   THEN s.data END) AS link,
 					COALESCE(MAX(CASE WHEN s.keyword = 'kind' THEN s.data END), d.tech) AS kind
 					FROM devices d
-					LEFT JOIN asterisk.sip s ON s.id = d.id
+					LEFT JOIN sip s ON s.id = d.id
 					$where
 					GROUP BY d.id
 					ORDER BY $sort $order
