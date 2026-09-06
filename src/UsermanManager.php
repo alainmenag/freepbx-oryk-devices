@@ -2,7 +2,7 @@
 
 // src/UsermanManager.php
 
-namespace FreePBX\Modules\Oryk_Devices;
+namespace FreePBX\Modules\Oryk_Connect;
 
 /**
  * The User Manager account behind an Extension/User device.

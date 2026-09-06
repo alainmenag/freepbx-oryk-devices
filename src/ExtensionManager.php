@@ -2,7 +2,7 @@
 
 // src/ExtensionManager.php
 
-namespace FreePBX\Modules\Oryk_Devices;
+namespace FreePBX\Modules\Oryk_Connect;
 
 /**
  * The Core extension behind an Extension/User device, and the state

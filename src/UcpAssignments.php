@@ -2,7 +2,7 @@
 
 // src/UcpAssignments.php
 
-namespace FreePBX\Modules\Oryk_Devices;
+namespace FreePBX\Modules\Oryk_Connect;
 
 /**
  * What an account is allowed to open.

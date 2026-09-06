@@ -2,7 +2,7 @@
 
 // src/DeviceManager.php
 
-namespace FreePBX\Modules\Oryk_Devices;
+namespace FreePBX\Modules\Oryk_Connect;
 
 /**
  * Creating, saving and deleting a device.

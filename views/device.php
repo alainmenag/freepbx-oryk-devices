@@ -14,9 +14,9 @@
 <form
 	class="fpbx-submit container-fluid"
 	name="submitSettings"
-	action="config.php?display=oryk_devices&action=view" 
+	action="config.php?display=oryk_connect&action=view" 
 	method="post"
-	data-fpbx-delete="config.php?display=oryk_devices&amp;id=<?= $file['id'] ?? '' ?>&amp;action=del"
+	data-fpbx-delete="config.php?display=oryk_connect&amp;id=<?= $file['id'] ?? '' ?>&amp;action=del"
 	style="
 		background-color: transparent;
 	"
@@ -55,11 +55,11 @@
 <script>
 
 	$(document).on('click', '[name="new"]', function () {
-		window.location.search = '?display=oryk_devices&action=view';
+		window.location.search = '?display=oryk_connect&action=view';
 	});
 
 	$(document).on('click', '[name="close"]', function() {
-		window.location.search = '?display=oryk_devices&action=list';
+		window.location.search = '?display=oryk_connect&action=list';
 	});
 
 </script>

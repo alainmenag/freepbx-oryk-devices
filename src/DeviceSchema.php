@@ -2,7 +2,7 @@
 
 // src/DeviceSchema.php
 
-namespace FreePBX\Modules\Oryk_Devices;
+namespace FreePBX\Modules\Oryk_Connect;
 
 /**
  * What a device is, as a form.

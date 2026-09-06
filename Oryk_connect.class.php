@@ -1,21 +1,21 @@
 <?php
 
-// Oryk_devices.class.php
+// Oryk_connect.class.php
 
 namespace FreePBX\modules;
 
 use BMO;
 use PDO;
 use FreePBX_Helpers;
-use FreePBX\Modules\Oryk_Devices\CdrHistory;
-use FreePBX\Modules\Oryk_Devices\DeviceManager;
-use FreePBX\Modules\Oryk_Devices\DeviceSchema;
-use FreePBX\Modules\Oryk_Devices\ExtensionManager;
-use FreePBX\Modules\Oryk_Devices\ExtensionRenumberer;
-use FreePBX\Modules\Oryk_Devices\NumberAllocator;
-use FreePBX\Modules\Oryk_Devices\UcpAssignments;
-use FreePBX\Modules\Oryk_Devices\UsermanManager;
-use FreePBX\Modules\Oryk_Devices\VoicemailManager;
+use FreePBX\Modules\Oryk_Connect\CdrHistory;
+use FreePBX\Modules\Oryk_Connect\DeviceManager;
+use FreePBX\Modules\Oryk_Connect\DeviceSchema;
+use FreePBX\Modules\Oryk_Connect\ExtensionManager;
+use FreePBX\Modules\Oryk_Connect\ExtensionRenumberer;
+use FreePBX\Modules\Oryk_Connect\NumberAllocator;
+use FreePBX\Modules\Oryk_Connect\UcpAssignments;
+use FreePBX\Modules\Oryk_Connect\UsermanManager;
+use FreePBX\Modules\Oryk_Connect\VoicemailManager;
 
 if (!class_exists('FreePBX\\Modules\\Core\\Driver', false)) {
 	require_once(\FreePBX::Config()->get('AMPWEBROOT') . '/admin/modules/core/functions.inc/Driver.class.php');
@@ -28,11 +28,11 @@ require_once __DIR__ . '/drivers/Rtsp.class.php';
 // nothing else, so anything standing alongside it has to say where it lives.
 // The driver is left out: it is required above, before the Core class it
 // extends can go missing, and that order is worth keeping deliberate.
-if (!defined('ORYK_DEVICES_AUTOLOADER')) {
-	define('ORYK_DEVICES_AUTOLOADER', true);
+if (!defined('ORYK_CONNECT_AUTOLOADER')) {
+	define('ORYK_CONNECT_AUTOLOADER', true);
 
 	spl_autoload_register(function ($class) {
-		$prefix = 'FreePBX\\Modules\\Oryk_Devices\\';
+		$prefix = 'FreePBX\\Modules\\Oryk_Connect\\';
 
 		if (strpos($class, $prefix) !== 0) {
 			return;
@@ -52,14 +52,14 @@ if (!defined('ORYK_DEVICES_AUTOLOADER')) {
 	});
 }
 
-class Oryk_devices extends FreePBX_Helpers implements \BMO
+class Oryk_connect extends FreePBX_Helpers implements \BMO
 {
 	/**
 	 * Database table used by this module.
 	 *
 	 * @var string
 	 */
-	private $table = 'oryk_devices_settings';
+	private $table = 'oryk_connect_settings';
 
 	/**
 	 * FreePBX application instance.
@@ -216,7 +216,7 @@ class Oryk_devices extends FreePBX_Helpers implements \BMO
 			$drivers = $prop->getValue($core);
 
 			if (!isset($drivers['rtsp'])) {
-				$drivers['rtsp'] = new \FreePBX\Modules\Oryk_Devices\Drivers\Rtsp($this->FreePBX);
+				$drivers['rtsp'] = new \FreePBX\Modules\Oryk_Connect\Drivers\Rtsp($this->FreePBX);
 			}
 
 			$prop->setValue($core, $drivers);
@@ -257,7 +257,7 @@ class Oryk_devices extends FreePBX_Helpers implements \BMO
 					$this->devices->remove($id);
 				}
 
-				header('Location: ?display=oryk_devices');
+				header('Location: ?display=oryk_connect');
 
 				return;
 

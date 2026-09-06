@@ -1,5 +1,5 @@
 <?php
-namespace FreePBX\Modules\Oryk_Devices\Drivers;
+namespace FreePBX\Modules\Oryk_Connect\Drivers;
 
 use FreePBX\Modules\Core\Driver;
 
