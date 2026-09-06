@@ -13,7 +13,7 @@ Device records are managed through FreePBX Core. RTSP feeds are integrated with 
   - **Handset** — PJSIP device with manufacturer, model, and management-link metadata.
   - **Softphone** — PJSIP softphone credentials.
   - **RTSP Feed** — video source registered with MediaMTX.
-- Generate unique 10-digit device IDs beginning with `99`.
+- Generate unique 10-digit device IDs beginning with `999`.
 - Trigger Endpoint Manager processing for PJSIP devices.
 - Restart RTSP feeds from the device list.
 - Generate browser playback links for RTSP feeds.
@@ -225,7 +225,7 @@ Use the refresh button beside an RTSP device to stop and restart its MediaMTX pa
 
 Additional device values are stored as key/value rows in the FreePBX `asterisk.sip` table.
 
-When a new record does not have an ID, the module generates a 10-digit identifier beginning with `99`. When an existing device is saved, it is deleted and recreated through FreePBX Core.
+When a new record does not have an ID, the module generates a 10-digit identifier beginning with `999`. When an existing device is saved, it is deleted and recreated through FreePBX Core.
 
 ## Project structure
 
@@ -236,8 +236,26 @@ functions.inc.php        FreePBX module hook placeholder
 install.php              Legacy installation entry point
 module.xml               Module metadata and FreePBX dependencies
 
+src/
+  Service.php            What every subsystem below is given: the FreePBX
+                         application, the database, the manager connection
+  DeviceSchema.php       What a device is, as a form: kinds, groups, fields
+  DeviceManager.php      Saving and deleting a device
+  NumberAllocator.php    Which numbers are free, and what the next one is
+  ExtensionRenumberer.php  Moving a device to a different number, in order
+  ExtensionManager.php   The Core extension and the Asterisk keys about it
+  UsermanManager.php     The User Manager account behind an Extension/User
+  VoicemailManager.php   Mailboxes, their aliases, and what dials them
+  UcpAssignments.php     What a UCP account is allowed to open
+  CdrHistory.php         Moving and removing an extension's call history
+
 drivers/
   Rtsp.class.php         Custom FreePBX Core driver backed by MediaMTX
+
+tests/
+  smoke.php              Standalone checks, no FreePBX required
+  stubs.php              Just enough FreePBX for them to run against
+  namespacing.php        Guards against unqualified global class names
 
 views/
   devices.php            Searchable device list and row actions
@@ -252,14 +270,23 @@ assets/css/
 
 `page.oryk_devices.php` obtains the `Oryk_devices` BMO instance and calls `showPage()`.
 
-The `Oryk_devices` class:
+`Oryk_devices` is the FreePBX side and nothing else. It registers the RTSP
+driver, routes the request, hands the submitted form to the right subsystem,
+and answers the AJAX the device list makes. It reads `$_REQUEST`; nothing
+under `src/` does.
 
-1. Registers the custom RTSP driver with FreePBX Core.
-2. Routes list, edit, save, and delete requests.
-3. Generates form fields based on the selected device kind.
-4. Validates the submitted Extension/User number before anything is written.
-5. Creates, renumbers, or replaces devices through FreePBX Core.
-6. Provides AJAX handlers for table data and RTSP restarts.
+The work itself is delegated:
+
+1. `DeviceSchema` decides what fields the selected kind is drawn with, and
+   arranges a device into them.
+2. `NumberAllocator` generates an id, or refuses a typed number that a
+   device, an extension or a User Manager account already holds.
+3. `DeviceManager` saves and deletes, sequencing everything below.
+4. `ExtensionRenumberer` moves a number, in the order that keeps the
+   extension, mailbox, account, handsets, assignments and call history
+   together.
+5. `ExtensionManager`, `UsermanManager`, `VoicemailManager`,
+   `UcpAssignments` and `CdrHistory` each own one of those.
 
 The device list in `views/devices.php` uses FreePBX's Bootstrap Table integration to request rows from:
 
@@ -326,6 +353,42 @@ After changing the module version or installation behavior, update `version` and
 fwconsole ma upgrade oryk_devices
 fwconsole reload
 ```
+
+### Subsystems
+
+Anything under `src/` is loaded by a small autoloader registered at the top
+of `Oryk_devices.class.php`, since BMO autoloads only the module class
+itself. A new class goes in `src/`, in the
+`FreePBX\Modules\Oryk_Devices` namespace, named after its file, and needs
+no registration anywhere.
+
+The RTSP driver is deliberately left out of that loader. It is required
+explicitly, after the Core class it extends has been made sure of, and that
+order is worth keeping visible in the file.
+
+### Smoke test
+
+```bash
+php tests/smoke.php
+```
+
+Runs anywhere, with nothing installed: `tests/stubs.php` stands in for
+FreePBX, the database and Asterisk. It checks that every subsystem loads,
+builds and wires together the way the module wires them; that a missing
+FreePBX module is declined rather than thrown; that number allocation
+refuses what it should; that the call history purge refuses anything that
+is not a number; and that saving a device produces the settings Core is
+meant to be handed, without touching the caller's copy of the form.
+
+One of the checks is lexical rather than behavioural: every global class
+named inside `src/` has to be qualified or imported, because unqualified it
+resolves inside `FreePBX\Modules\Oryk_Devices`, and the file then fatals --
+but only on the line that runs it, which may be a path no page opens until
+somebody deletes a device.
+
+It is not a substitute for trying a renumber on a real PBX -- it knows
+nothing about voicemail.conf, the Asterisk database or a CDR table. It
+catches the kind of mistake refactoring makes, before a deploy does.
 
 ## Known limitations
 
