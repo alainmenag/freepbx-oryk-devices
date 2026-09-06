@@ -6,98 +6,21 @@
 //
 //     php tests/smoke.php
 //
-// This does not need FreePBX, a database or Asterisk. It stands the
-// subsystems up against stubs and checks the things that are true whatever
-// the site looks like: that the classes load and build at all, that a
-// missing module is declined rather than thrown, that the two lists the
-// call history lines up by position stay the same length, and that the
-// purge guard refuses anything that is not a number.
-//
-// It is not a substitute for trying a renumber on a real PBX. It is here to
-// catch the class of mistake a refactor makes -- a namespace, a constructor,
-// a method that moved and left a caller behind -- before a deploy does.
+// This does not need FreePBX, a database or Asterisk -- tests/stubs.php
+// stands in for all three. It is not a substitute for trying a renumber on
+// a real PBX. It is here to catch the class of mistake refactoring makes --
+// a namespace, a constructor, a method that moved and left a caller behind,
+// a guard that throws instead of declining -- before a deploy does.
 
-define('FPBX_LOG_ERROR', 'ERROR');
-define('FPBX_LOG_WARNING', 'WARNING');
-define('FPBX_LOG_INFO', 'INFO');
-
-$LOG = [];
-
-function freepbx_log($level, $message)
-{
-	global $LOG;
-
-	$LOG[] = $level . ': ' . $message;
-}
-
-/** Stands in for the Modules object, with nothing installed by default. */
-class OrykSmokeModules
-{
-	public $active = [];
-
-	public function checkStatus($module)
-	{
-		return in_array($module, $this->active, true);
-	}
-
-	public function loadFunctionsInc($module)
-	{
-		return false;
-	}
-}
-
-/** Stands in for the FreePBX application object. */
-class OrykSmokeFreePBX
-{
-	public $Modules;
-	public $Database;
-	public $astman;
-
-	public function __construct()
-	{
-		$this->Modules = new OrykSmokeModules();
-		$this->Database = null;
-		$this->astman = null;
-	}
-}
-
-if (!class_exists('FreePBX')) {
-	class FreePBX
-	{
-		public static function Config()
-		{
-			return new class {
-				public function get($key)
-				{
-					return '/var/spool/asterisk';
-				}
-			};
-		}
-	}
-}
-
-// The same loader the module registers, pointed at this checkout
-spl_autoload_register(function ($class) {
-	$prefix = 'FreePBX\\Modules\\Oryk_Devices\\';
-
-	if (strpos($class, $prefix) !== 0) {
-		return;
-	}
-
-	$relative = substr($class, strlen($prefix));
-
-	if (strpos($relative, 'Drivers\\') === 0) {
-		return;
-	}
-
-	$file = __DIR__ . '/../src/' . str_replace('\\', '/', $relative) . '.php';
-
-	if (is_file($file)) {
-		require_once $file;
-	}
-});
+require_once __DIR__ . '/stubs.php';
 
 use FreePBX\Modules\Oryk_Devices\CdrHistory;
+use FreePBX\Modules\Oryk_Devices\DeviceManager;
+use FreePBX\Modules\Oryk_Devices\DeviceSchema;
+use FreePBX\Modules\Oryk_Devices\ExtensionManager;
+use FreePBX\Modules\Oryk_Devices\ExtensionRenumberer;
+use FreePBX\Modules\Oryk_Devices\NumberAllocator;
+use FreePBX\Modules\Oryk_Devices\UcpAssignments;
 use FreePBX\Modules\Oryk_Devices\UsermanManager;
 use FreePBX\Modules\Oryk_Devices\VoicemailManager;
 
@@ -112,66 +35,264 @@ function is_eq($label, $got, $want)
 	$ok ? $passed++ : $failed++;
 
 	printf(
-		"  [%s] %-52s %s\n",
+		"  [%s] %-54s %s\n",
 		$ok ? 'ok' : 'FAIL',
 		$label,
 		$ok ? '' : 'got ' . json_encode($got) . ', wanted ' . json_encode($want)
 	);
 }
 
-$freepbx = new OrykSmokeFreePBX();
+/** Build the whole set, the way the module class does. */
+function build()
+{
+	FreePBX::$core = new StubCore();
 
-echo "they build:\n";
+	$app = new StubApp();
+	$schema = new DeviceSchema($app);
+	$voicemail = new VoicemailManager($app);
+	$cdr = new CdrHistory($app, $voicemail);
+	$userman = new UsermanManager($app);
+	$ucp = new UcpAssignments($app);
+	$extensions = new ExtensionManager($app);
+	$numbers = new NumberAllocator($app, $userman);
+	$renumberer = new ExtensionRenumberer($app, $extensions, $voicemail, $userman, $ucp, $cdr);
+	$devices = new DeviceManager(
+		$app, $schema, $numbers, $renumberer, $extensions, $userman, $voicemail, $ucp, $cdr
+	);
 
-$voicemail = new VoicemailManager($freepbx);
-$cdr = new CdrHistory($freepbx, $voicemail);
-$userman = new UsermanManager($freepbx);
+	return compact(
+		'app', 'schema', 'voicemail', 'cdr', 'userman', 'ucp',
+		'extensions', 'numbers', 'renumberer', 'devices'
+	);
+}
 
-is_eq('VoicemailManager', get_class($voicemail), 'FreePBX\Modules\Oryk_Devices\VoicemailManager');
-is_eq('CdrHistory', get_class($cdr), 'FreePBX\Modules\Oryk_Devices\CdrHistory');
-is_eq('UsermanManager', get_class($userman), 'FreePBX\Modules\Oryk_Devices\UsermanManager');
+$s = build();
+
+echo "everything builds, and wires together the way the module does:\n";
+
+foreach (['schema' => 'DeviceSchema', 'voicemail' => 'VoicemailManager',
+          'cdr' => 'CdrHistory', 'userman' => 'UsermanManager',
+          'ucp' => 'UcpAssignments', 'extensions' => 'ExtensionManager',
+          'numbers' => 'NumberAllocator', 'renumberer' => 'ExtensionRenumberer',
+          'devices' => 'DeviceManager'] as $key => $class) {
+	is_eq($class, get_class($s[$key]), 'FreePBX\Modules\Oryk_Devices\\' . $class);
+}
+
+echo "\nthe schema still describes every kind of device:\n";
+
+foreach (['pjsip', 'handset', 'softphone', 'rtsp'] as $kind) {
+	is_eq('kind ' . $kind, isset($s['schema']->types[$kind]), true);
+}
+
+is_eq('only Extension/User creates a user',
+	array_keys(array_filter($s['schema']->types, function ($t) {
+		return !empty($t['creates_user']);
+	})), ['pjsip']);
+is_eq('Extension/User forces media encryption on',
+	$s['schema']->types['pjsip']['settings']['media_encryption'] ?? null, 'sdes');
+$undefined = [];
+
+foreach ($s['schema']->types as $kind => $type) {
+	foreach (($type['fields'] ?? []) as $field) {
+		if (!isset($s['schema']->fields[$field])) {
+			$undefined[] = $kind . '.' . $field;
+		}
+	}
+}
+
+is_eq('every field a type names is defined', $undefined, []);
 
 echo "\nwhat reaches a mailbox, which the call history lines up by position:\n";
 
-is_eq(
-	'a long enough number gets the prefix as well',
-	$voicemail->dialableNumbers('1001'),
-	['vmu1001', 'vmb1001', 'vms1001', 'vmi1001', '*1001']
-);
-is_eq(
-	'a two digit one would collide with the feature codes',
-	$voicemail->dialableNumbers('98'),
-	['vmu98', 'vmb98', 'vms98', 'vmi98']
-);
-is_eq(
-	'two numbers of the same shape line up',
-	count($voicemail->dialableNumbers('1001')),
-	count($voicemail->dialableNumbers('2002'))
-);
+is_eq('a long enough number gets the prefix as well',
+	$s['voicemail']->dialableNumbers('1001'),
+	['vmu1001', 'vmb1001', 'vms1001', 'vmi1001', '*1001']);
+is_eq('a two digit one would collide with the feature codes',
+	$s['voicemail']->dialableNumbers('98'),
+	['vmu98', 'vmb98', 'vms98', 'vmi98']);
+is_eq('two numbers of the same shape line up',
+	count($s['voicemail']->dialableNumbers('1001')),
+	count($s['voicemail']->dialableNumbers('2002')));
 
-echo "\nnothing installed: everything declines rather than throwing:\n";
+echo "\nnumber allocation:\n";
 
-is_eq('moveMailbox', $voicemail->moveMailbox('1001', '2002'), false);
-is_eq('hasMailbox', $voicemail->hasMailbox('1001'), false);
-is_eq('syncEmail', $voicemail->syncEmail('1001', 'someone@example.com'), false);
-is_eq('cdr migrate', $cdr->migrate('1001', '2002'), 0);
-is_eq('cdr purge', $cdr->purge('1001'), ['rows' => 0, 'recordings' => 0]);
-is_eq('userman findByExtension', $userman->findByExtension('1001'), null);
-is_eq('userman ownedAccount', $userman->ownedAccount('1001'), null);
-is_eq('userman ensure', $userman->ensure('1001', 'Desk Phone'), false);
-is_eq('userman sync', $userman->sync('1001', 'Desk Phone'), false);
-is_eq('userman removeOwnedAccount', $userman->removeOwnedAccount('1001'), false);
+$s['app']->Database->answers = ['MAX(CAST(id' => '9990000005'];
+is_eq('the next id follows the highest taken', $s['numbers']->generate(), '9990000006');
+
+$s['app']->Database->answers = [];
+is_eq('nothing taken yet starts the range', $s['numbers']->generate(), '9990000001');
+is_eq('a free number is accepted', $s['numbers']->assertAvailable('1001'), '1001');
+is_eq('a free number is not a conflict', $s['numbers']->findConflict('1001'), null);
+
+foreach (['abc', '10a1', '', '10 01', '-5'] as $bad) {
+	$threw = false;
+	try {
+		$s['numbers']->assertAvailable($bad);
+	} catch (\Exception $e) {
+		$threw = true;
+	}
+	is_eq('"' . $bad . '" is refused', $threw, true);
+}
+
+$threw = false;
+try {
+	$s['numbers']->assertAvailable('12345678901');
+} catch (\Exception $e) {
+	$threw = true;
+}
+is_eq('too long is refused', $threw, true);
+
+$s['app']->Database->answers = ['SELECT description FROM devices' => 'Front Desk'];
+is_eq('a number a device holds is a conflict',
+	is_string($s['numbers']->findConflict('1001')), true);
+is_eq('but the device may keep its own number',
+	$s['numbers']->assertAvailable('1001', '1001'), '1001');
+$s['app']->Database->answers = [];
+
+echo "\nnothing installed: every subsystem declines rather than throwing:\n";
+
+is_eq('moveMailbox', $s['voicemail']->moveMailbox('1001', '2002'), false);
+is_eq('hasMailbox', $s['voicemail']->hasMailbox('1001'), false);
+is_eq('syncEmail', $s['voicemail']->syncEmail('1001', 'a@example.com'), false);
+is_eq('cdr migrate', $s['cdr']->migrate('1001', '2002'), 0);
+is_eq('cdr purge', $s['cdr']->purge('1001'), ['rows' => 0, 'recordings' => 0]);
+is_eq('userman findByExtension', $s['userman']->findByExtension('1001'), null);
+is_eq('userman ownedAccount', $s['userman']->ownedAccount('1001'), null);
+is_eq('userman ensure', $s['userman']->ensure('1001', 'Desk'), false);
+is_eq('userman sync', $s['userman']->sync('1001', 'Desk'), false);
+is_eq('userman removeOwnedAccount', $s['userman']->removeOwnedAccount('1001'), false);
 
 echo "\nthe purge guard: what is not a number would match the whole table:\n";
 
 $LOG = [];
-
-is_eq('a path is refused', $cdr->purge('../etc'), ['rows' => 0, 'recordings' => 0]);
+is_eq('a path is refused', $s['cdr']->purge('../etc'), ['rows' => 0, 'recordings' => 0]);
 is_eq('and said so once', count($LOG), 1);
-is_eq('with the module prefix', strpos($LOG[0], 'ERROR: oryk_devices: refusing to purge') === 0, true);
-is_eq('nothing is refused', $cdr->purge(''), ['rows' => 0, 'recordings' => 0]);
-is_eq('a fragment of SQL is refused', $cdr->purge('1001 OR 1=1'), ['rows' => 0, 'recordings' => 0]);
-is_eq('a number with a space is refused', $cdr->purge('10 01'), ['rows' => 0, 'recordings' => 0]);
+is_eq('with the module prefix',
+	strpos($LOG[0], 'ERROR: oryk_devices: refusing to purge') === 0, true);
+is_eq('nothing is refused', $s['cdr']->purge(''), ['rows' => 0, 'recordings' => 0]);
+is_eq('a fragment of SQL is refused', $s['cdr']->purge('1001 OR 1=1'), ['rows' => 0, 'recordings' => 0]);
+is_eq('a number with a space is refused', $s['cdr']->purge('10 01'), ['rows' => 0, 'recordings' => 0]);
+
+echo "\nsaving a device -- what store() actually builds:\n";
+
+$s = build();
+$input = [
+	'DEVICE_ID' => '',
+	'DEVICE_KIND' => 'pjsip',
+	'DEVICE_USER' => '1001',
+	'DEVICE_DESCRIPTION' => 'Front Desk',
+	'DEVICE_EMAIL' => 'desk@example.com',
+	'DEVICE_SECRET' => 'from-the-form',
+	'media_encryption' => 'no',
+];
+$before = $input;
+
+$uid = $s['devices']->store($input);
+$added = FreePBX::$core->added;
+$settings = $added['settings'];
+
+is_eq('the typed number becomes the device id', $uid, '1001');
+is_eq('store() leaves the caller\'s form untouched', $input, $before);
+is_eq('the device is added under that id', (string) $added['id'], '1001');
+is_eq('as pjsip', $added['tech'], 'pjsip');
+is_eq('account is the id', $settings['account']['value'], '1001');
+is_eq('dial follows the driver', $settings['dial']['value'], 'PJSIP/1001');
+is_eq('mailbox is the device alias', $settings['mailbox']['value'], '1001@device');
+is_eq('user is the id, since this kind owns it', $settings['user']['value'], '1001');
+is_eq('the description is what was typed', $settings['description']['value'], 'Front Desk');
+is_eq('the secret from the form wins', $settings['secret']['value'], 'from-the-form');
+is_eq('emergency cid defaults to the id', $settings['emergency_cid']['value'], '1001');
+is_eq('every setting has a value', count(array_filter($settings, function ($x) {
+	return !array_key_exists('value', $x);
+})), 0);
+is_eq('every setting has a flag', count(array_filter($settings, function ($x) {
+	return !array_key_exists('flag', $x);
+})), 0);
+is_eq('including the ones not returned by the driver',
+	[isset($settings['account']['flag']), isset($settings['dial']['flag']),
+	 isset($settings['mailbox']['flag']), isset($settings['media_encryption_optimistic']['flag'])],
+	[true, true, true, true]);
+
+echo "\n  the type pins some settings down, whatever the form said:\n";
+
+is_eq('media encryption is forced on', $settings['media_encryption']['value'], 'sdes');
+is_eq('and optimistically', $settings['media_encryption_optimistic']['value'], 'yes');
+
+echo "\n  a blank description falls back to the number:\n";
+
+$s = build();
+$uid = $s['devices']->store([
+	'DEVICE_ID' => '', 'DEVICE_KIND' => 'pjsip', 'DEVICE_USER' => '1002',
+	'DEVICE_DESCRIPTION' => '',
+]);
+is_eq('the device is named after itself',
+	FreePBX::$core->added['settings']['description']['value'], '1002');
+is_eq('and the extension is created with that name',
+	FreePBX::$core->users['1002']['name'] ?? null, '1002');
+
+echo "\n  a blank number is generated, not left empty:\n";
+
+$s = build();
+$s['app']->Database->answers = ['MAX(CAST(id' => '9990000012'];
+$uid = $s['devices']->store([
+	'DEVICE_ID' => '', 'DEVICE_KIND' => 'pjsip', 'DEVICE_USER' => '',
+	'DEVICE_DESCRIPTION' => 'Generated',
+]);
+is_eq('the next id in the range', $uid, '9990000013');
+is_eq('the endpoint manager is run for it', FreePBX::$core->epm, ['9990000013']);
+
+echo "\n  a kind that does not own a user leaves the extension alone:\n";
+
+$s = build();
+$s['app']->Database->answers = ['MAX(CAST(id' => '9990000020'];
+$uid = $s['devices']->store([
+	'DEVICE_ID' => '', 'DEVICE_KIND' => 'handset', 'DEVICE_USER' => '1001',
+	'DEVICE_DESCRIPTION' => 'Desk Handset',
+]);
+is_eq('the handset gets a generated id', $uid, '9990000021');
+is_eq('and points at the extension that was typed',
+	FreePBX::$core->added['settings']['user']['value'], '1001');
+is_eq('no extension was created', FreePBX::$core->users, []);
+
+echo "\n  a number already taken is refused, and nothing is written:\n";
+
+$s = build();
+$s['app']->Database->answers = ['SELECT description FROM devices' => 'Somebody Else'];
+$threw = false;
+try {
+	$s['devices']->store([
+		'DEVICE_ID' => '', 'DEVICE_KIND' => 'pjsip', 'DEVICE_USER' => '1001',
+		'DEVICE_DESCRIPTION' => 'Mine',
+	]);
+} catch (\Exception $e) {
+	$threw = true;
+}
+is_eq('it throws', $threw, true);
+is_eq('no device was added', FreePBX::$core->added, null);
+is_eq('no extension was created', FreePBX::$core->users, []);
+
+echo "\nreading a device back into the form:\n";
+
+$s = build();
+FreePBX::$core->devices['1001'] = [
+	'id' => '1001', 'tech' => 'pjsip', 'kind' => 'pjsip',
+	'description' => 'Front Desk', 'user' => '1001',
+];
+$form = $s['schema']->buildFormData('1001');
+
+is_eq('the id comes back', $form['id'], '1001');
+is_eq('the description is in the basics group',
+	$form['basics']['DEVICE_DESCRIPTION']['value'] ?? null, 'Front Desk');
+is_eq('the kind field offers every type',
+	array_keys($form['basics']['DEVICE_KIND']['options'] ?? []),
+	['pjsip', 'handset', 'softphone', 'rtsp']);
+
+$redraw = $s['schema']->buildFormData('1001', [
+	'DEVICE_DESCRIPTION' => 'What Was Typed',
+	'DEVICE_KIND' => 'pjsip',
+]);
+is_eq('a redraw shows what was typed, not what is stored',
+	$redraw['basics']['DEVICE_DESCRIPTION']['value'] ?? null, 'What Was Typed');
 
 printf("\n%d passed, %d failed\n", $passed, $failed);
 

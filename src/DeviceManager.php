@@ -206,11 +206,15 @@ class DeviceManager extends Service
 			}
 		}
 
-		// Ensure all fields have 'value' and 'flag'
-		foreach ($generated as &$s) {
-			$s['value'] = $s['value'] ?? '';
-			$s['flag'] = $s['flag'] ?? 0;
+		// Everything the driver gave back, filled in. This runs here rather
+		// than only at the end because the emergency caller id check below
+		// asks whether a value is empty, which a missing one is not.
+		foreach ($generated as &$setting) {
+			$setting['value'] = $setting['value'] ?? '';
+			$setting['flag'] = $setting['flag'] ?? 0;
 		}
+
+		unset($setting); // or the next loop over $generated writes through it
 
 		$dial = $defaults['dial'] ?? 'DEVICE';
 
@@ -231,6 +235,15 @@ class DeviceManager extends Service
 			}
 
 			$generated[$keyword]['value'] = $value;
+		}
+
+		// account, dial and mailbox are set above rather than coming from the
+		// driver, and the type's own settings are added after that, so any of
+		// them the driver did not already return was created here with a
+		// value and nothing else. Core expects both keys on every setting.
+		foreach ($generated as $keyword => $setting) {
+			$generated[$keyword]['value'] = $setting['value'] ?? '';
+			$generated[$keyword]['flag'] = $setting['flag'] ?? 0;
 		}
 
 		// Make sure the matching user exists and owns this device
