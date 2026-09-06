@@ -1,4 +1,4 @@
-# Oryk Devices for FreePBX
+# Oryk Connect for FreePBX
 
 A FreePBX administration module for managing PJSIP extensions, physical handsets, softphones, and RTSP video feeds from one interface.
 
@@ -38,7 +38,7 @@ Clone the repository into the FreePBX modules directory:
 
 ```bash
 cd /var/www/html/admin/modules
-git clone https://github.com/alainmenag/freepbx-oryk-devices.git oryk_connect
+git clone https://github.com/alainmenag/freepbx-oryk-connect.git oryk_connect
 ```
 
 Set the expected FreePBX ownership and install the module:
@@ -61,11 +61,43 @@ fwconsole reload
 
 The installer attempts to add indexes for `devices.id` and `devices.user`. Back up the FreePBX database before installing or upgrading custom modules.
 
+### Coming from Oryk Devices
+
+This module was named **Oryk Devices** and installed as `oryk_devices`. The
+rawname is now `oryk_connect`, and FreePBX identifies a module by its rawname:
+the renamed module is a new one as far as FreePBX is concerned, not an upgrade
+of the old one. `fwconsole ma upgrade` will not carry the old install across.
+
+Install the renamed module alongside the old one, then remove the old
+directory. The old module is marked non-uninstallable in its own `module.xml`,
+so `fwconsole ma uninstall oryk_devices` is refused and deleting the directory
+is what removes it:
+
+```bash
+cd /var/www/html/admin/modules
+git clone https://github.com/alainmenag/freepbx-oryk-connect.git oryk_connect
+fwconsole chown
+fwconsole ma install oryk_connect
+rm -rf oryk_devices
+fwconsole reload
+```
+
+No device data moves with it. The module keeps nothing of its own: devices,
+extensions, User Manager accounts, mailboxes and RTSP settings all live in the
+FreePBX Core tables (`devices`, `sip`, `users`, `userman_users`), so every
+device created under the old name is already in the list under the new one.
+
+What does change is the URL and the menu entry. Bookmarks and links pointing at
+`?display=oryk_devices` become `?display=oryk_connect`, and the menu item moves
+from **Oryk → Devices** to **Oryk → Connect**. Anything calling this module's
+methods directly reaches it as `FreePBX::Oryk_connect()`, and the subsystems
+under `src/` are in the `FreePBX\Modules\Oryk_Connect` namespace.
+
 ## Usage
 
 After installation, open:
 
-**FreePBX Administration → Oryk → Devices**
+**FreePBX Administration → Oryk → Connect**
 
 ### Create a PJSIP device
 
