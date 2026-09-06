@@ -230,7 +230,7 @@ When a new record does not have an ID, the module generates a 10-digit identifie
 ## Project structure
 
 ```text
-Oryk_Connect.class.php   Main BMO class, device definitions, CRUD, and AJAX handlers
+Oryk_connect.class.php   Main BMO class, device definitions, CRUD, and AJAX handlers
 page.oryk_connect.php    FreePBX page entry point
 functions.inc.php        FreePBX module hook placeholder
 install.php              Legacy installation entry point
@@ -268,9 +268,9 @@ assets/css/
 
 ## Runtime flow
 
-`page.oryk_connect.php` obtains the `Oryk_Connect` BMO instance and calls `showPage()`.
+`page.oryk_connect.php` obtains the `Oryk_connect` BMO instance and calls `showPage()`.
 
-`Oryk_Connect` is the FreePBX side and nothing else. It registers the RTSP
+`Oryk_connect` is the FreePBX side and nothing else. It registers the RTSP
 driver, routes the request, hands the submitted form to the right subsystem,
 and answers the AJAX the device list makes. It reads `$_REQUEST`; nothing
 under `src/` does.
@@ -357,7 +357,7 @@ fwconsole reload
 ### Subsystems
 
 Anything under `src/` is loaded by a small autoloader registered at the top
-of `Oryk_Connect.class.php`, since BMO autoloads only the module class
+of `Oryk_connect.class.php`, since BMO autoloads only the module class
 itself. A new class goes in `src/`, in the
 `FreePBX\Modules\Oryk_Connect` namespace, named after its file, and needs
 no registration anywhere.

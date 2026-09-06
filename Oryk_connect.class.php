@@ -1,6 +1,6 @@
 <?php
 
-// Oryk_Connect.class.php
+// Oryk_connect.class.php
 
 namespace FreePBX\modules;
 
@@ -52,7 +52,7 @@ if (!defined('ORYK_CONNECT_AUTOLOADER')) {
 	});
 }
 
-class Oryk_Connect extends FreePBX_Helpers implements \BMO
+class Oryk_connect extends FreePBX_Helpers implements \BMO
 {
 	/**
 	 * Database table used by this module.
