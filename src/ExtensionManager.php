@@ -56,6 +56,32 @@ class ExtensionManager extends Service
 	}
 
 	/**
+	 * Write the voicemail context an extension's mailbox is in.
+	 *
+	 * Core::addUser() reads the mailbox before a renumbering has moved it,
+	 * so the extension is left naming a context its mailbox is no longer in,
+	 * or naming none at all. The value has to be written back once the box
+	 * has actually moved, in both of the places Core keeps it: the row
+	 * FreePBX reads, and the Asterisk key the dialplan reads.
+	 *
+	 * @param int|string $extension Extension to write.
+	 * @param string     $context   Voicemail context the mailbox is in.
+	 *
+	 * @return bool True when the row was written.
+	 */
+	public function setVoicemailContext($extension, $context)
+	{
+		$sth = $this->db->prepare('UPDATE users SET voicemail = ? WHERE extension = ?');
+		$sth->execute([$context, $extension]);
+
+		if ($this->astmanReady()) {
+			$this->astman->database_put('AMPUSER', $extension . '/voicemail', $context);
+		}
+
+		return true;
+	}
+
+	/**
 	 * Make sure a user/extension exists for the given id.
 	 *
 	 * Device kinds flagged with `creates_user` are their own user, so the
