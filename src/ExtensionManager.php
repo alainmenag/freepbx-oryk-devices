@@ -4,8 +4,6 @@
 
 namespace FreePBX\Modules\Oryk_Devices;
 
-use PDO;
-
 /**
  * The Core extension behind an Extension/User device, and the state
  * Asterisk reads about it.
@@ -165,7 +163,7 @@ class ExtensionManager extends Service
 	{
 		$sth = $this->db->prepare('SELECT id FROM devices WHERE user = ? AND id != ?');
 		$sth->execute([$old, $new]);
-		$ids = $sth->fetchAll(PDO::FETCH_COLUMN);
+		$ids = $sth->fetchAll(\PDO::FETCH_COLUMN);
 
 		if (!$ids) {
 			return 0;

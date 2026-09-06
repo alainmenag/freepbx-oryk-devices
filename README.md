@@ -255,6 +255,7 @@ drivers/
 tests/
   smoke.php              Standalone checks, no FreePBX required
   stubs.php              Just enough FreePBX for them to run against
+  namespacing.php        Guards against unqualified global class names
 
 views/
   devices.php            Searchable device list and row actions
@@ -378,6 +379,12 @@ FreePBX module is declined rather than thrown; that number allocation
 refuses what it should; that the call history purge refuses anything that
 is not a number; and that saving a device produces the settings Core is
 meant to be handed, without touching the caller's copy of the form.
+
+One of the checks is lexical rather than behavioural: every global class
+named inside `src/` has to be qualified or imported, because unqualified it
+resolves inside `FreePBX\Modules\Oryk_Devices`, and the file then fatals --
+but only on the line that runs it, which may be a path no page opens until
+somebody deletes a device.
 
 It is not a substitute for trying a renumber on a real PBX -- it knows
 nothing about voicemail.conf, the Asterisk database or a CDR table. It

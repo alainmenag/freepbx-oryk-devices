@@ -372,7 +372,7 @@ class CdrHistory extends Service
 				);
 				$sth->execute($match['params']);
 
-				while ($row = $sth->fetch(PDO::FETCH_ASSOC)) {
+				while ($row = $sth->fetch(\PDO::FETCH_ASSOC)) {
 					foreach ($wanted as $column) {
 						if (!empty($row[$column])) {
 							$calls[$row[$column]] = true;
@@ -675,7 +675,7 @@ class CdrHistory extends Service
 			$sth = $cdrdb->prepare('SHOW COLUMNS FROM `' . $table . '`');
 			$sth->execute();
 
-			$this->columns[$table] = $sth->fetchAll(PDO::FETCH_COLUMN);
+			$this->columns[$table] = $sth->fetchAll(\PDO::FETCH_COLUMN);
 		} catch (\Exception $e) {
 			return [];
 		}

@@ -31,16 +31,33 @@ class StubStatement
 	public $column = false;
 	public $rows = [];
 	public $params = null;
+	public $affected = 0;
+	public $fetchRows = [];
+	public $fetchColumns = [];
+	public $onExecute = null;
 
 	public function execute($params = null)
 	{
 		$this->params = $params;
 
+		if ($this->onExecute) {
+			call_user_func($this->onExecute, $params);
+		}
+
 		return true;
+	}
+
+	public function fetch($mode = null)
+	{
+		return $this->fetchRows ? array_shift($this->fetchRows) : false;
 	}
 
 	public function fetchColumn($n = 0)
 	{
+		if ($this->fetchColumns) {
+			return array_shift($this->fetchColumns);
+		}
+
 		return $this->column;
 	}
 
@@ -56,7 +73,7 @@ class StubStatement
 
 	public function rowCount()
 	{
-		return 0;
+		return $this->affected;
 	}
 }
 
@@ -93,6 +110,86 @@ class StubDatabase
 		$this->seen[] = $sql;
 
 		return 0;
+	}
+}
+
+/**
+ * A CDR database that answers by what the statement looks like.
+ *
+ * The real one varies with the FreePBX version and with which optional
+ * modules a site has, which is the whole reason CdrHistory asks what is in
+ * front of it rather than assuming. This answers as a plain install would.
+ */
+class StubCdrDatabase
+{
+	public $tables = ['cdr'];
+	public $columns = [
+		'cdr' => ['calldate', 'clid', 'src', 'dst', 'channel', 'dstchannel',
+		          'lastapp', 'duration', 'disposition', 'uniqueid', 'linkedid',
+		          'accountcode', 'peeraccount', 'cnum', 'recordingfile'],
+		'cel' => ['eventtype', 'cid_num', 'cid_ani', 'exten', 'channame',
+		          'peer', 'accountcode', 'peeraccount', 'uniqueid', 'linkedid'],
+	];
+	public $calls = [['uniqueid' => '1700000000.1', 'linkedid' => '1700000000.1']];
+	public $recordings = ['out-1001-2002-20260101-120000-1700000000.1.wav'];
+	public $statements = [];
+
+	public function prepare($sql)
+	{
+		$this->statements[] = $sql;
+		$statement = new StubStatement();
+
+		if (strpos($sql, 'SHOW TABLES LIKE') !== false) {
+			$statement->onExecute = function ($params) use ($statement) {
+				$wanted = is_array($params) ? reset($params) : null;
+				$statement->column = in_array($wanted, $this->tables, true) ? $wanted : false;
+			};
+
+			return $statement;
+		}
+
+		if (preg_match('/SHOW COLUMNS FROM `(\w+)`/', $sql, $m)) {
+			$statement->rows = $this->columns[$m[1]] ?? [];
+
+			return $statement;
+		}
+
+		if (strpos($sql, 'uniqueid') !== false && strpos($sql, 'SELECT') === 0) {
+			$statement->fetchRows = $this->calls;
+
+			return $statement;
+		}
+
+		if (strpos($sql, 'recordingfile') !== false && strpos($sql, 'SELECT') === 0) {
+			$statement->fetchColumns = $this->recordings;
+
+			return $statement;
+		}
+
+		$statement->affected = 1; // an UPDATE or DELETE that matched something
+
+		return $statement;
+	}
+}
+
+/** The parts of the CDR module this module calls. */
+class StubCdr
+{
+	public $handle;
+
+	public function __construct()
+	{
+		$this->handle = new StubCdrDatabase();
+	}
+
+	public function getCdrDbHandle()
+	{
+		return $this->handle;
+	}
+
+	public function getDbTable()
+	{
+		return 'cdr';
 	}
 }
 
@@ -228,6 +325,17 @@ class FreePBX
 				return FreePBX::$config[$key] ?? '';
 			}
 		};
+	}
+
+	public static $cdr;
+
+	public static function Cdr()
+	{
+		if (self::$cdr === null) {
+			self::$cdr = new StubCdr();
+		}
+
+		return self::$cdr;
 	}
 
 	public static function Framework()

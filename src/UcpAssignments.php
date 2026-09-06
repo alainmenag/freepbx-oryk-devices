@@ -4,8 +4,6 @@
 
 namespace FreePBX\Modules\Oryk_Devices;
 
-use PDO;
-
 /**
  * What an account is allowed to open.
  *
@@ -61,7 +59,7 @@ class UcpAssignments extends Service
 					'SELECT DISTINCT val FROM `' . $table . '` WHERE `key` = ? AND module LIKE ?'
 				);
 				$sth->execute(['assigned', 'ucp|%']);
-				$values = $sth->fetchAll(PDO::FETCH_COLUMN);
+				$values = $sth->fetchAll(\PDO::FETCH_COLUMN);
 			} catch (\Exception $e) {
 				continue; // the table is not there on this install
 			}
@@ -132,7 +130,7 @@ class UcpAssignments extends Service
 					'SELECT DISTINCT val FROM `' . $table . '` WHERE `key` = ? AND module LIKE ?'
 				);
 				$sth->execute(['assigned', 'ucp|%']);
-				$values = $sth->fetchAll(PDO::FETCH_COLUMN);
+				$values = $sth->fetchAll(\PDO::FETCH_COLUMN);
 			} catch (\Exception $e) {
 				continue; // the table is not there on this install
 			}

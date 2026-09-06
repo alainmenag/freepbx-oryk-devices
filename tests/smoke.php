@@ -13,6 +13,7 @@
 // a guard that throws instead of declining -- before a deploy does.
 
 require_once __DIR__ . '/stubs.php';
+require_once __DIR__ . '/namespacing.php';
 
 use FreePBX\Modules\Oryk_Devices\CdrHistory;
 use FreePBX\Modules\Oryk_Devices\DeviceManager;
@@ -46,6 +47,7 @@ function is_eq($label, $got, $want)
 function build()
 {
 	FreePBX::$core = new StubCore();
+	FreePBX::$cdr = new StubCdr();
 
 	$app = new StubApp();
 	$schema = new DeviceSchema($app);
@@ -293,6 +295,86 @@ $redraw = $s['schema']->buildFormData('1001', [
 ]);
 is_eq('a redraw shows what was typed, not what is stored',
 	$redraw['basics']['DEVICE_DESCRIPTION']['value'] ?? null, 'What Was Typed');
+
+echo "\nevery global class named in src/ is qualified or imported:\n";
+
+$unqualified = [];
+
+foreach (glob(__DIR__ . '/../src/*.php') as $file) {
+	$unqualified = array_merge($unqualified, oryk_unqualified_classes($file));
+}
+
+// PDO::FETCH_COLUMN inside namespace FreePBX\Modules\Oryk_Devices is
+// FreePBX\Modules\Oryk_Devices\PDO, which does not exist. It fatals only
+// when the line runs, and the line that found this one runs when somebody
+// deletes a device with call history.
+is_eq('nothing unqualified', $unqualified, []);
+
+echo "\nwith the CDR module installed, the history is actually walked:\n";
+
+$s = build();
+$s['app']->Modules->active = ['cdr'];
+
+$LOG = [];
+$rows = $s['cdr']->migrate('1001', '2002');
+
+is_eq('migrate rewrites rows', $rows > 0, true);
+is_eq('and says how many it moved',
+	(bool) array_filter($LOG, function ($l) {
+		return strpos($l, 'moved') !== false && strpos($l, 'call history rows') !== false;
+	}), true);
+
+$statements = FreePBX::$cdr->handle->statements;
+
+// migrate() deliberately does not read the columns first: it names the ones
+// the reports read and lets runUpdate() step over any this site does not
+// have. purge() cannot do that -- it has to build one match clause -- which
+// is why only it reads them.
+is_eq('it checked which tables the site has',
+	(bool) array_filter($statements, function ($q) {
+		return strpos($q, 'SHOW TABLES LIKE') !== false;
+	}), true);
+is_eq('and did not need to read the columns',
+	(bool) array_filter($statements, function ($q) {
+		return strpos($q, 'SHOW COLUMNS') !== false;
+	}), false);
+is_eq('it rewrote the plain number columns',
+	(bool) array_filter($statements, function ($q) {
+		return strpos($q, 'SET `src` = :new') !== false;
+	}), true);
+is_eq('it rewrote inside channel names',
+	(bool) array_filter($statements, function ($q) {
+		return strpos($q, 'REPLACE(`channel`') !== false;
+	}), true);
+is_eq('it rewrote the caller id string',
+	(bool) array_filter($statements, function ($q) {
+		return strpos($q, 'SET clid = REPLACE(clid') !== false;
+	}), true);
+is_eq('it moved the voicemail pseudo extensions too',
+	(bool) array_filter($statements, function ($q) {
+		return strpos($q, 'SET dst = :new WHERE dst = :old') !== false;
+	}), true);
+
+$s = build();
+$s['app']->Modules->active = ['cdr'];
+
+$LOG = [];
+$removed = $s['cdr']->purge('1001');
+
+is_eq('purge finds and deletes the calls', $removed['rows'] > 0, true);
+is_eq('it read the columns before matching',
+	(bool) array_filter(FreePBX::$cdr->handle->statements, function ($q) {
+		return strpos($q, 'SHOW COLUMNS') !== false;
+	}), true);
+is_eq('it deleted by call identifier, not by extension',
+	(bool) array_filter(FreePBX::$cdr->handle->statements, function ($q) {
+		return strpos($q, 'DELETE FROM') !== false
+			&& (strpos($q, 'uniqueid') !== false || strpos($q, 'linkedid') !== false);
+	}), true);
+is_eq('nothing was logged as a failure',
+	array_values(array_filter($LOG, function ($l) {
+		return strpos($l, 'ERROR') === 0;
+	})), []);
 
 printf("\n%d passed, %d failed\n", $passed, $failed);
 
