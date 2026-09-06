@@ -578,6 +578,7 @@ class Oryk_devices extends FreePBX_Helpers implements \BMO
 
 		// addUser() reads the mailbox before it has moved, so the voicemail
 		// context is written back once the box is on the new number
+		$hadMailbox = $this->hasMailbox($old);
 		$context = $this->moveVoicemailBox($old, $new);
 
 		if ($context) {
@@ -597,10 +598,25 @@ class Oryk_devices extends FreePBX_Helpers implements \BMO
 		}
 
 		if ($hadUser) {
+			// Voicemail deletes the mailbox behind Core::delUser(), which is
+			// right for a number being retired but not for one whose mailbox
+			// is still sitting on it because the move did not come off. Edit
+			// mode holds that hook back; the astdb keys it also spares are
+			// taken out here instead.
+			$stranded = $hadMailbox && !$context;
+
+			if ($stranded) {
+				freepbx_log(FPBX_LOG_ERROR, 'oryk_devices: the mailbox on ' . $old . ' did not move to ' . $new . ' and has been left where it is');
+			}
+
 			try {
-				\FreePBX::Core()->delUser($old);
+				\FreePBX::Core()->delUser($old, $stranded);
 			} catch (\Exception $e) {
 				freepbx_log(FPBX_LOG_ERROR, 'oryk_devices: unable to delete user ' . $old . ': ' . $e->getMessage());
+			}
+
+			if ($stranded) {
+				$this->forgetExtension($old);
 			}
 		}
 
@@ -610,6 +626,13 @@ class Oryk_devices extends FreePBX_Helpers implements \BMO
 
 		// Handsets and softphones registered against the old extension follow it
 		$this->repointDevices($old, $new);
+
+		// What the account is allowed to open, before the history it opens
+		$this->moveUcpAssignments($old, $new);
+
+		// The call history keeps the number as it stood when the call was
+		// placed, and no part of FreePBX moves it
+		$this->migrateCdr($old, $new);
 
 		return true;
 	}
@@ -707,8 +730,16 @@ class Oryk_devices extends FreePBX_Helpers implements \BMO
 				}
 			}
 
-			// No mailbox, or the new number already has one of its own
-			if ($context === null || isset($vmconf[$context][$new])) {
+			if ($context === null) {
+				return false; // nothing to move
+			}
+
+			// The new number already has a mailbox of its own. Merging two
+			// mailboxes is not something to decide here, so the move stops and
+			// the caller keeps the messages where they are.
+			if (isset($vmconf[$context][$new])) {
+				freepbx_log(FPBX_LOG_ERROR, 'oryk_devices: not moving the mailbox from ' . $old . ' to ' . $new . ': ' . $new . ' already has one');
+
 				return false;
 			}
 
@@ -716,14 +747,24 @@ class Oryk_devices extends FreePBX_Helpers implements \BMO
 
 			unset($vmconf[$context][$old]);
 
-			$voicemail->saveVoicemail($vmconf);
-
 			// The messages themselves are stored under the old number
 			$spool = \FreePBX::Config()->get('ASTSPOOLDIR') . '/voicemail/' . $context;
 
 			if (is_dir($spool . '/' . $old) && !file_exists($spool . '/' . $new)) {
 				@rename($spool . '/' . $old, $spool . '/' . $new);
 			}
+
+			// A mailbox is reached through an alias keyed on the number rather
+			// than directly, so the alias has to move with it
+			$this->moveVoicemailAlias($voicemail, $old, $new, $context, $spool);
+
+			// saveVoicemail() rebuilds the alias section from the key/value
+			// store but merges into whatever is already there, so the parsed
+			// copy of it goes before the old alias can be written back out
+			unset($vmconf['pbxaliases']);
+
+			// Written out once, with the mailbox and its alias both moved
+			$voicemail->saveVoicemail($vmconf);
 		} catch (\Exception $e) {
 			freepbx_log(FPBX_LOG_ERROR, 'oryk_devices: unable to move the mailbox from ' . $old . ' to ' . $new . ': ' . $e->getMessage());
 
@@ -731,6 +772,456 @@ class Oryk_devices extends FreePBX_Helpers implements \BMO
 		}
 
 		return $context;
+	}
+
+	/**
+	 * Move the device-to-mailbox alias that follows a mailbox.
+	 *
+	 * A FreePBX mailbox is not reached directly. The device asks for
+	 * `<id>@device` and an alias maps that onto the real
+	 * `<mailbox>@<context>`. On Asterisk 16.2 and later the alias is a
+	 * [pbxaliases] section that saveVoicemail() builds from the voicemail
+	 * module's own key/value store; before that it was a symlink under
+	 * voicemail/device. Both are keyed on the number, so a mailbox that
+	 * moves without its alias is a mailbox nothing points at: no message
+	 * waiting indicator, and *97 answering on an empty box.
+	 *
+	 * Nothing is saved here. The caller writes voicemail.conf out once the
+	 * mailbox and its alias have both been moved.
+	 *
+	 * @param object     $voicemail Voicemail module instance.
+	 * @param int|string $old       Number being left behind.
+	 * @param int|string $new       Number being moved to.
+	 * @param string     $context   Voicemail context holding the mailbox.
+	 * @param string     $spool     Spool directory for that context.
+	 *
+	 * @return bool True when the alias was moved.
+	 */
+	private function moveVoicemailAlias($voicemail, $old, $new, $context, $spool)
+	{
+		try {
+			// The alias map, for the Asterisk versions that use one
+			$voicemail->delConfig((string) $old, 'vmmapping');
+			$voicemail->updateAliasDeviceMapping((string) $new, $new . '@' . $context, false);
+
+			// The symlink, for the ones that do not
+			$devices = dirname($spool) . '/device/';
+
+			if (is_link($devices . $old)) {
+				@unlink($devices . $old);
+			}
+
+			// file_exists() follows the link, so a dangling one reads as absent
+			// and would leave the symlink below failing quietly
+			if (is_link($devices . $new)) {
+				@unlink($devices . $new);
+			}
+
+			if (is_dir($devices) && !file_exists($devices . $new)) {
+				@symlink($spool . '/' . $new, $devices . $new);
+			}
+		} catch (\Exception $e) {
+			freepbx_log(FPBX_LOG_ERROR, 'oryk_devices: unable to move the voicemail alias from ' . $old . ' to ' . $new . ': ' . $e->getMessage());
+
+			return false;
+		}
+
+		return true;
+	}
+
+	/**
+	 * Report whether an extension has a mailbox.
+	 *
+	 * Asked before a mailbox is moved so the caller can tell a number that
+	 * never had one from a number whose mailbox failed to follow it.
+	 *
+	 * @param int|string $extension Extension to look at.
+	 *
+	 * @return bool True when a mailbox is configured for the extension.
+	 */
+	private function hasMailbox($extension)
+	{
+		if (!$this->FreePBX->Modules->checkStatus('voicemail')) {
+			return false;
+		}
+
+		try {
+			$mailbox = \FreePBX::Voicemail()->getVoicemailBoxByExtension((string) $extension);
+		} catch (\Exception $e) {
+			return false;
+		}
+
+		return !empty($mailbox['vmcontext']);
+	}
+
+	/**
+	 * Take an extension's Asterisk database entries out.
+	 *
+	 * Core clears these itself when it deletes a user outright, and skips
+	 * them in edit mode. A renumbering that has to use edit mode to protect a
+	 * mailbox still wants them gone, so they are removed here.
+	 *
+	 * @param int|string $extension Number being retired.
+	 *
+	 * @return void
+	 */
+	private function forgetExtension($extension)
+	{
+		if (!$this->astman || !$this->astman->connected()) {
+			return;
+		}
+
+		foreach (['AMPUSER/', 'CustomDevstate/FOLLOWME', 'DEVICE/', 'ZULU/'] as $family) {
+			$this->astman->database_deltree($family . $extension);
+		}
+	}
+
+	/**
+	 * Carry the call history over to a new extension number.
+	 *
+	 * Nothing in FreePBX does this. A call detail record keeps the number as
+	 * it stood when the call was placed, the CDR module subscribes to no
+	 * core hook, and FreePBX has no renumbering of its own to hook into, so
+	 * the history is rewritten here or it stays behind on a number that no
+	 * longer answers.
+	 *
+	 * What is rewritten is what the reports read: the CDR report matches on
+	 * src, dst, cnum and the two channel names, and displays clid. Recording
+	 * file names carry the extension as well and are deliberately left
+	 * alone, because the name has to keep matching the file on disk or the
+	 * recording stops being playable.
+	 *
+	 * @param int|string $old Number being left behind.
+	 * @param int|string $new Number being moved to.
+	 *
+	 * @return int How many rows were rewritten.
+	 */
+	public function migrateCdr($old, $new)
+	{
+		if (!$this->FreePBX->Modules->checkStatus('cdr')) {
+			return 0;
+		}
+
+		try {
+			$cdrdb = \FreePBX::Cdr()->getCdrDbHandle();
+		} catch (\Exception $e) {
+			freepbx_log(FPBX_LOG_ERROR, 'oryk_devices: no CDR database to move ' . $old . ' in: ' . $e->getMessage());
+
+			return 0;
+		}
+
+		// Of the columns being rewritten only dst and dstchannel are indexed,
+		// so on a system with a long history these statements read the table
+		// end to end. A move that is cut short half way through leaves the
+		// history split across two numbers, so it is allowed to take its time.
+		if (function_exists('set_time_limit')) {
+			@set_time_limit(0);
+		}
+
+		$rows = 0;
+
+		// The main table is named in Advanced Settings, and the name the CDR
+		// module reports is the one it is currently reading, which on a system
+		// running the CDR trigger is the transient copy rather than the
+		// configured table. Both are asked for, and the defaults kept alongside.
+		$configured = [];
+
+		try {
+			$configured[] = (string) \FreePBX::Config()->get('CDRDBTABLENAME');
+			$configured[] = (string) \FreePBX::Cdr()->getDbTable();
+		} catch (\Exception $e) {
+			// whatever could not be read is covered by the defaults below
+		}
+
+		$tables = array_unique(array_filter(array_merge(
+			$configured,
+			['cdr', 'transient_cdr', 'replicate_cdr']
+		)));
+
+		// A site running the CDR trigger keeps a second, recent copy of the
+		// same rows for the phone call log, and that trigger only fires on
+		// insert, so each copy has to be rewritten in its own right
+		foreach ($tables as $table) {
+			if ($this->cdrTableExists($cdrdb, $table)) {
+				$rows += $this->migrateCdrTable($cdrdb, $table, $old, $new);
+			}
+		}
+
+		// Channel event logging, when the site records it
+		if ($this->cdrTableExists($cdrdb, 'cel')) {
+			$rows += $this->migrateCelTable($cdrdb, 'cel', $old, $new);
+		}
+
+		freepbx_log(FPBX_LOG_INFO, 'oryk_devices: moved ' . $rows . ' call history rows from ' . $old . ' to ' . $new);
+
+		return $rows;
+	}
+
+	/**
+	 * Report whether a table is present in the CDR database.
+	 *
+	 * Which of the CDR tables exist depends on the site: the transient copy
+	 * only appears once the CDR trigger has been set up, and channel event
+	 * logging is optional.
+	 *
+	 * @param object $cdrdb CDR database handle.
+	 * @param string $table Table to look for.
+	 *
+	 * @return bool True when the table is there.
+	 */
+	private function cdrTableExists($cdrdb, $table)
+	{
+		try {
+			$sth = $cdrdb->prepare('SHOW TABLES LIKE ?');
+			$sth->execute([$table]);
+
+			return (bool) $sth->fetchColumn();
+		} catch (\Exception $e) {
+			return false;
+		}
+	}
+
+	/**
+	 * Rewrite one call detail table for a number that has moved.
+	 *
+	 * @param object     $cdrdb CDR database handle.
+	 * @param string     $table Table to rewrite.
+	 * @param int|string $old   Number being left behind.
+	 * @param int|string $new   Number being moved to.
+	 *
+	 * @return int How many rows were rewritten.
+	 */
+	private function migrateCdrTable($cdrdb, $table, $old, $new)
+	{
+		$t = '`' . $table . '`';
+		$rows = 0;
+
+		// Columns holding the number on its own. accountcode and peeraccount
+		// only hold an extension on a site that has chosen to put one there,
+		// so they are matched exactly and are a no-op everywhere else.
+		foreach (['src', 'dst', 'cnum', 'accountcode', 'peeraccount'] as $column) {
+			$rows += $this->runCdrUpdate(
+				$cdrdb,
+				'UPDATE ' . $t . ' SET `' . $column . '` = :new WHERE `' . $column . '` = :old',
+				[':old' => $old, ':new' => $new]
+			);
+		}
+
+		// dst also carries the voicemail pseudo extensions that Core adds to
+		// the dialplan, and the star code that dials a mailbox
+		foreach (['vmu', 'vmb', 'vms', 'vmi', '*'] as $prefix) {
+			$rows += $this->runCdrUpdate(
+				$cdrdb,
+				'UPDATE ' . $t . ' SET dst = :new WHERE dst = :old',
+				[':old' => $prefix . $old, ':new' => $prefix . $new]
+			);
+		}
+
+		// The number inside a channel name, in both the shapes it takes:
+		// PJSIP/1001-0000abcd and Local/1001@from-internal-0000abcd
+		foreach (['channel', 'dstchannel'] as $column) {
+			$rows += $this->replaceInColumn($cdrdb, $t, $column, $old, $new);
+		}
+
+		// The caller id string the reports display
+		$rows += $this->runCdrUpdate(
+			$cdrdb,
+			'UPDATE ' . $t . ' SET clid = REPLACE(clid, :needle, :replacement) WHERE clid LIKE :match',
+			[
+				':needle' => '<' . $old . '>',
+				':replacement' => '<' . $new . '>',
+				':match' => '%<' . $old . '>%',
+			]
+		);
+
+		return $rows;
+	}
+
+	/**
+	 * Rewrite the channel event log for a number that has moved.
+	 *
+	 * @param object     $cdrdb CDR database handle.
+	 * @param string     $table Table to rewrite.
+	 * @param int|string $old   Number being left behind.
+	 * @param int|string $new   Number being moved to.
+	 *
+	 * @return int How many rows were rewritten.
+	 */
+	private function migrateCelTable($cdrdb, $table, $old, $new)
+	{
+		$t = '`' . $table . '`';
+		$rows = 0;
+
+		foreach (['cid_num', 'cid_ani', 'exten', 'accountcode', 'peeraccount'] as $column) {
+			$rows += $this->runCdrUpdate(
+				$cdrdb,
+				'UPDATE ' . $t . ' SET `' . $column . '` = :new WHERE `' . $column . '` = :old',
+				[':old' => $old, ':new' => $new]
+			);
+		}
+
+		foreach (['vmu', 'vmb', 'vms', 'vmi', '*'] as $prefix) {
+			$rows += $this->runCdrUpdate(
+				$cdrdb,
+				'UPDATE ' . $t . ' SET exten = :new WHERE exten = :old',
+				[':old' => $prefix . $old, ':new' => $prefix . $new]
+			);
+		}
+
+		foreach (['channame', 'peer'] as $column) {
+			$rows += $this->replaceInColumn($cdrdb, $t, $column, $old, $new);
+		}
+
+		return $rows;
+	}
+
+	/**
+	 * Swap one number for another inside a channel name column.
+	 *
+	 * A channel name carries the number between the technology and the call
+	 * identifier, in three shapes: `PJSIP/1001-0000abcd`,
+	 * `Local/1001@from-internal-0000abcd`, and the follow-me channel
+	 * `Local/FMPR-1001@findmefollow-ringallv2-0000abcd`, which is the one the
+	 * CDR module's own history query looks for as `%-1001@%`. Matching on the
+	 * delimiters either side is what keeps 1001 from being found inside 11001
+	 * or inside the call identifier that follows it.
+	 *
+	 * @param object     $cdrdb  CDR database handle.
+	 * @param string     $t      Quoted table name.
+	 * @param string     $column Column to rewrite.
+	 * @param int|string $old    Number being left behind.
+	 * @param int|string $new    Number being moved to.
+	 *
+	 * @return int How many rows were rewritten.
+	 */
+	private function replaceInColumn($cdrdb, $t, $column, $old, $new)
+	{
+		$rows = 0;
+
+		foreach ([['/', '-'], ['/', '@'], ['-', '@']] as $delimiters) {
+			list($opens, $closes) = $delimiters;
+			$needle = $opens . $old . $closes;
+
+			$rows += $this->runCdrUpdate(
+				$cdrdb,
+				'UPDATE ' . $t . ' SET `' . $column . '` = REPLACE(`' . $column . '`, :needle, :replacement)'
+					. ' WHERE `' . $column . '` LIKE :match',
+				[
+					':needle' => $needle,
+					':replacement' => $opens . $new . $closes,
+					':match' => '%' . $needle . '%',
+				]
+			);
+		}
+
+		return $rows;
+	}
+
+	/**
+	 * Run one call history update.
+	 *
+	 * The columns present in the CDR database vary with the FreePBX version
+	 * and with which optional modules the site has installed, so a statement
+	 * naming a column that is not there is logged and stepped over rather
+	 * than being allowed to abandon the rest of the move.
+	 *
+	 * @param object                $cdrdb  CDR database handle.
+	 * @param string                $sql    Statement to run.
+	 * @param array<string, mixed>  $params Values to bind.
+	 *
+	 * @return int How many rows the statement changed.
+	 */
+	private function runCdrUpdate($cdrdb, $sql, $params)
+	{
+		try {
+			$sth = $cdrdb->prepare($sql);
+			$sth->execute($params);
+
+			return $sth->rowCount();
+		} catch (\Exception $e) {
+			freepbx_log(FPBX_LOG_WARNING, 'oryk_devices: ' . $sql . ': ' . $e->getMessage());
+
+			return 0;
+		}
+	}
+
+	/**
+	 * Move the extension in the settings that decide what an account may see.
+	 *
+	 * User Manager stores the extensions a UCP account is allowed to open as
+	 * a list per module, and Sangoma Connect keeps its own row naming the
+	 * device. Both hold the number outright, so an account left pointing at
+	 * the old one opens its call history and voicemail on an extension that
+	 * is no longer there, which reads to the person as though the records
+	 * were lost along with the number.
+	 *
+	 * Accounts set to follow their own extension rather than a number are
+	 * already correct and are left alone.
+	 *
+	 * @param int|string $old Number being left behind.
+	 * @param int|string $new Number being moved to.
+	 *
+	 * @return int How many settings were moved.
+	 */
+	public function moveUcpAssignments($old, $new)
+	{
+		$moved = 0;
+
+		foreach (['userman_users_settings', 'userman_groups_settings'] as $table) {
+			try {
+				// Matched on the stored value rather than on the account, so
+				// this does not depend on how either table is keyed
+				$sth = $this->db->prepare(
+					'SELECT DISTINCT val FROM `' . $table . '` WHERE `key` = ? AND module LIKE ?'
+				);
+				$sth->execute(['assigned', 'ucp|%']);
+				$values = $sth->fetchAll(PDO::FETCH_COLUMN);
+			} catch (\Exception $e) {
+				continue; // the table is not there on this install
+			}
+
+			$update = null;
+
+			foreach ($values as $val) {
+				$assigned = json_decode((string) $val, true);
+
+				if (!is_array($assigned) || !in_array((string) $old, array_map('strval', $assigned), true)) {
+					continue;
+				}
+
+				// array_values() keeps this a JSON list rather than an object,
+				// and array_unique() stops an account already holding both
+				// numbers from ending up with the new one listed twice
+				$replaced = json_encode(array_values(array_unique(array_map(
+					function ($extension) use ($old, $new) {
+						return ((string) $extension === (string) $old) ? (string) $new : (string) $extension;
+					},
+					$assigned
+				))));
+
+				try {
+					$update = $update ?: $this->db->prepare(
+						'UPDATE `' . $table . '` SET val = ? WHERE `key` = ? AND module LIKE ? AND val = ?'
+					);
+					$update->execute([$replaced, 'assigned', 'ucp|%', $val]);
+					$moved += $update->rowCount();
+				} catch (\Exception $e) {
+					freepbx_log(FPBX_LOG_ERROR, 'oryk_devices: unable to move UCP assignment ' . $old . ' to ' . $new . ': ' . $e->getMessage());
+				}
+			}
+		}
+
+		// Sangoma Connect names the device it registered for the account, and
+		// the call history query reads it to find those calls
+		try {
+			$sth = $this->db->prepare('UPDATE webrtc_clients SET `user` = ? WHERE `user` = ?');
+			$sth->execute([$new, $old]);
+			$moved += $sth->rowCount();
+		} catch (\Exception $e) {
+			// Sangoma Connect is not installed on this system
+		}
+
+		return $moved;
 	}
 
 	/**
