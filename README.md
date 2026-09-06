@@ -125,6 +125,74 @@ recording stops being playable.
 > and a renumbering can take a while. The PHP time limit is lifted for the
 > duration.
 
+### Delete an Extension/User device
+
+Deleting an **Extension/User** device deletes the extension and, when this
+module owns it, the User Manager account. Once the last device pointing at the
+extension has gone, everything the number left behind goes with it:
+
+- The extensions the number was listed among in UCP, and any web client
+  registered against it.
+- Its call history, in `cdr`, the transient and replicate copies, and `cel`.
+- The recordings those records were the only way to reach.
+
+Handsets and softphones are not extensions, and deleting one leaves the
+extension it pointed at, and that extension's history, alone.
+
+> [!CAUTION]
+> This is a permanent deletion, not an archive, and there is no undo. A record
+> of a call between two extensions belongs to both of them, and it is removed
+> even when the other one is still in service: the other extension loses those
+> calls from its own history, and the recording of them from disk. Take a
+> backup of `asteriskcdrdb` before deleting an extension whose history matters.
+
+Nothing is deleted unless the extension itself was deleted first. A failure
+part way leaves the records where they are and says so in the FreePBX log,
+and the recordings are only unlinked once no surviving record names them.
+
+#### How the records are found
+
+The call detail records decide what goes; the event log follows them.
+
+1. Find the records naming the number, matched exactly on `src` or `dst`.
+2. Take the `uniqueid` and `linkedid` off each one.
+3. Delete every `cel` row carrying either identifier, then every call detail
+   row carrying either identifier, in `cdr` and in the transient and
+   replicate copies.
+
+The chain identifier is what makes this complete. A call is more than one row
+in both tables, and only one of its channels carries the record's own
+identifier: a plain extension-to-extension call is one call detail record and
+fifteen events across two channels, of which six belong to the second channel
+and are reachable only through `linkedid`. Matching on the record identifier
+alone would leave those six behind.
+
+It is also what makes it wide. A queue call or a transfer carries one chain
+across every leg of it, so deleting an extension that answered one call in a
+queue removes the event log for that whole interaction, including the legs
+that rang other agents.
+
+Two columns are enough to seed it because the rest of a call is reached
+through the identifiers rather than by matching: the other channels carry
+identifiers of their own and are found through the chain, not through the
+number.
+
+Nothing else a record holds is matched on directly — not `cnum`, the channel
+names, the caller id string, `accountcode` or `peeraccount`. A false match
+here is not one row: each record found contributes both its own identifier
+and its chain, and everything carrying either is deleted from both tables, so
+a caller id name that happens to read as this number, or an account code a
+site uses for a tenant, would take whole calls belonging to somebody else
+with it.
+
+> [!NOTE]
+> A call the extension answered through a ring group, a queue or follow-me is
+> addressed to the **group**, not to the extension: the record carries the
+> group's number in `dst` and the extension only in `dstchannel`. Such a call
+> is not matched, so a queue member's answered calls are left behind. Matching
+> `dstchannel` would find them, at the cost of deleting the whole queue
+> interaction, including the legs that rang other agents.
+
 ### Create an RTSP feed
 
 1. Select **New**.
@@ -270,8 +338,15 @@ fwconsole reload
 - Device updates delete and recreate the existing FreePBX device.
 - Renumbering an Extension/User device does not check other FreePBX
   destinations, such as ring groups or queues, for the number.
-- Renumbering rewrites historical call detail records in place. There is no
-  undo, and the change is not reflected in any CDR export taken beforehand.
+- Renumbering rewrites historical call detail records in place, and deleting
+  an Extension/User removes them outright along with their recordings. Neither
+  can be undone, and neither is reflected in a CDR export taken beforehand.
+- Deletion is reached from the device list without a confirmation prompt. The
+  device list shows every device on the system, not only the ones this module
+  created, so an ordinary FreePBX extension deleted from this screen loses its
+  call history the same way.
+- A call recording is unlinked only when no surviving record names it, which
+  costs one indexed lookup per recording.
 - A mailbox is not moved onto a number that already has one of its own. The
   messages are left where they are, the renumbering continues, and the reason
   is written to the FreePBX log.
