@@ -79,6 +79,26 @@ After installation, open:
 
 PJSIP saves are performed through FreePBX Core and trigger Endpoint Manager processing.
 
+### Number an Extension/User device
+
+An **Extension/User** device is its own device id, extension and User Manager
+account, so the **Extension/User** field sets all three.
+
+- **Left blank**, the module assigns the next free number in the reserved
+  `999…` range, ten digits long. This is what a new device gets when no number
+  is supplied.
+- **Filled in**, the number is used as typed. It has to be digits only, at most
+  ten of them, and free: a number already held by a device, an extension or a
+  User Manager account is refused, the form is redrawn with the reason, and
+  nothing is written.
+- **Changed on an existing device**, the device is renumbered. The extension
+  keeps its settings, the User Manager account keeps its password, groups and
+  UCP settings, the mailbox and its messages move with it, and handsets or
+  softphones pointed at the old extension are repointed at the new one.
+
+The old number is only given up once the extension exists on the new one, so a
+failed renumbering leaves the device where it was.
+
 ### Create an RTSP feed
 
 1. Select **New**.
@@ -143,8 +163,9 @@ The `Oryk_devices` class:
 1. Registers the custom RTSP driver with FreePBX Core.
 2. Routes list, edit, save, and delete requests.
 3. Generates form fields based on the selected device kind.
-4. Creates or replaces devices through FreePBX Core.
-5. Provides AJAX handlers for table data and RTSP restarts.
+4. Validates the submitted Extension/User number before anything is written.
+5. Creates, renumbers, or replaces devices through FreePBX Core.
+6. Provides AJAX handlers for table data and RTSP restarts.
 
 The device list in `views/devices.php` uses FreePBX's Bootstrap Table integration to request rows from:
 
@@ -221,6 +242,10 @@ fwconsole reload
 - `functions.inc.php` and `install.php` contain placeholder implementations.
 - The module is marked as non-disableable and non-uninstallable in `module.xml`.
 - Device updates delete and recreate the existing FreePBX device.
+- Renumbering an Extension/User device does not check other FreePBX
+  destinations, such as ring groups or queues, for the number.
+- Failures during a renumbering that follow the extension move (User Manager,
+  mailbox, linked handsets) are logged rather than reported in the interface.
 - There is no automated test suite.
 
 ## License

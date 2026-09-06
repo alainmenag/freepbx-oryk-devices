@@ -307,9 +307,19 @@ class Oryk_devices extends FreePBX_Helpers implements \BMO
 
 			case 'setkey': // save
 
-				//die(json_encode($_REQUEST));
+				$submitted = $_REQUEST;
 
-				$id = $this->store($this->fields);
+				try {
+					$id = $this->store($this->fields);
+				} catch (\Exception $e) {
+					// Nothing was written: redraw the form with what was typed
+					return load_view(__DIR__ . '/views/device.php', [
+						'types' => $this->types,
+						'groups' => $this->groups,
+						'file' => $this->pull($submitted['DEVICE_ID'] ?? null, $submitted),
+						'error' => $e->getMessage(),
+					]);
+				}
 
 				$url = $_SERVER['REQUEST_URI'] . '&id=' . $id;
 
@@ -363,6 +373,402 @@ class Oryk_devices extends FreePBX_Helpers implements \BMO
 		}
 
 		return (string) $next;
+	}
+
+	/**
+	 * Validate an Extension/User number typed into the form.
+	 *
+	 * An Extension/User device is its own device id, extension and User
+	 * Manager account, so the number has to be digits only and free:
+	 * anything already holding it would otherwise be overwritten.
+	 *
+	 * @param int|string      $number    Number typed into the form.
+	 * @param int|string|null $currentId Device being edited, if any.
+	 *
+	 * @return string The validated number.
+	 *
+	 * @throws \Exception When the number is malformed or already taken.
+	 */
+	public function assertNumberAvailable($number, $currentId = null)
+	{
+		$number = trim((string) $number);
+
+		if (!preg_match('/^[0-9]+$/', $number)) {
+			throw new \Exception(sprintf(
+				_('"%s" is not a valid Extension/User number: digits only.'),
+				$number
+			));
+		}
+
+		if (strlen($number) > self::NUMBER_LENGTH) {
+			throw new \Exception(sprintf(
+				_('Extension/User %s is too long: %d digits at most.'),
+				$number,
+				self::NUMBER_LENGTH
+			));
+		}
+
+		// The number a device already carries is its own, not a conflict
+		if ((string) $currentId !== '' && (string) $currentId === $number) {
+			return $number;
+		}
+
+		$conflict = $this->findNumberConflict($number);
+
+		if ($conflict !== null) {
+			throw new \Exception($conflict);
+		}
+
+		return $number;
+	}
+
+	/**
+	 * Describe what already holds a number.
+	 *
+	 * @param int|string $number Extension/user number.
+	 *
+	 * @return string|null Why the number is taken, null when it is free.
+	 */
+	public function findNumberConflict($number)
+	{
+		$sth = $this->db->prepare('SELECT description FROM devices WHERE id = ? LIMIT 1');
+		$sth->execute([$number]);
+		$description = $sth->fetchColumn();
+
+		if ($description !== false) {
+			return sprintf(
+				_('Extension/User %s is already taken by the device "%s".'),
+				$number,
+				(string) $description !== '' ? $description : $number
+			);
+		}
+
+		$sth = $this->db->prepare('SELECT name FROM users WHERE extension = ? LIMIT 1');
+		$sth->execute([$number]);
+		$name = $sth->fetchColumn();
+
+		if ($name !== false) {
+			return sprintf(
+				_('Extension/User %s is already taken by the extension "%s".'),
+				$number,
+				(string) $name !== '' ? $name : $number
+			);
+		}
+
+		$account = $this->findUsermanUser($number);
+
+		if ($account) {
+			return sprintf(
+				_('Extension/User %s is already taken by the User Manager account "%s".'),
+				$number,
+				$account['username']
+			);
+		}
+
+		return null;
+	}
+
+	/**
+	 * Look up the User Manager account tied to an extension.
+	 *
+	 * An account named after the extension is preferred over one that merely
+	 * has the extension assigned to it, so the caller can tell the account
+	 * this module owns from a person's account linked by hand.
+	 *
+	 * @param int|string $extension Extension/user number.
+	 *
+	 * @return array<string, mixed>|null The account, or null when there is none.
+	 */
+	private function findUsermanUser($extension)
+	{
+		if (trim((string) $extension) === '' || !$this->FreePBX->Modules->checkStatus('userman')) {
+			return null;
+		}
+
+		try {
+			$userman = \FreePBX::Userman();
+			$user = $userman->getUserByUsername($extension);
+
+			if (empty($user['id'])) {
+				$user = $userman->getUserByDefaultExtension($extension);
+			}
+		} catch (\Exception $e) {
+			return null;
+		}
+
+		return empty($user['id']) ? null : $user;
+	}
+
+	/**
+	 * Move an Extension/User device to a different number.
+	 *
+	 * The extension, its User Manager account, its mailbox and every handset
+	 * pointed at it follow the device, so the number stays one thing across
+	 * Core, User Manager and Voicemail.
+	 *
+	 * The new number is expected to be free: assertNumberAvailable() is what
+	 * stops a collision and it runs before anything here is written. The old
+	 * number is only given up once the new extension is in place, so a
+	 * failure leaves the device where it was.
+	 *
+	 * @param int|string  $old         Number being left behind.
+	 * @param int|string  $new         Number being moved to.
+	 * @param string      $displayname Display name for the extension.
+	 * @param string      $tech        Device technology.
+	 * @param string|null $email       Email address for the account.
+	 *
+	 * @return bool True when the number was moved.
+	 *
+	 * @throws \Exception When the extension cannot be recreated on the new number.
+	 */
+	public function renumber($old, $new, $displayname, $tech = 'pjsip', $email = null)
+	{
+		$old = trim((string) $old);
+		$new = trim((string) $new);
+
+		if ($old === '' || $new === '' || $old === $new) {
+			return false;
+		}
+
+		$displayname = ($displayname === null || $displayname === '') ? $new : $displayname;
+
+		// Everything the old number carries is read before any of it is removed
+		$hadUser = $this->hasUser($old);
+		$settings = [];
+
+		if ($hadUser) {
+			try {
+				$settings = \FreePBX::Core()->getUser($old);
+			} catch (\Exception $e) {
+				$settings = [];
+			}
+		}
+
+		$account = $this->findUsermanUser($old);
+
+		// Carry the extension's own settings over when they could be read
+		if (!empty($settings['extension'])) {
+			$settings['extension'] = $new;
+			$settings['name'] = $displayname;
+			$settings['device'] = $new;
+
+			// A caller id pinned to the old number would follow the extension
+			if ((string) ($settings['cid_masquerade'] ?? '') === $old) {
+				$settings['cid_masquerade'] = '';
+			}
+
+			try {
+				\FreePBX::Core()->addUser($new, $settings);
+			} catch (\Exception $e) {
+				throw new \Exception(sprintf(
+					_('Unable to move extension %s to %s: %s'),
+					$old,
+					$new,
+					$e->getMessage()
+				));
+			}
+		} else {
+			$this->ensureUser($new, $displayname);
+		}
+
+		// addUser() reads the mailbox before it has moved, so the voicemail
+		// context is written back once the box is on the new number
+		$context = $this->moveVoicemailBox($old, $new);
+
+		if ($context) {
+			$sth = $this->db->prepare('UPDATE users SET voicemail = ? WHERE extension = ?');
+			$sth->execute([$context, $new]);
+
+			if ($this->astman && $this->astman->connected()) {
+				$this->astman->database_put('AMPUSER', $new . '/voicemail', $context);
+			}
+		}
+
+		// Only now is the old number given up
+		try {
+			\FreePBX::Core()->delDevice($old);
+		} catch (\Exception $e) {
+			freepbx_log(FPBX_LOG_ERROR, 'oryk_devices: unable to delete device ' . $old . ': ' . $e->getMessage());
+		}
+
+		if ($hadUser) {
+			try {
+				\FreePBX::Core()->delUser($old);
+			} catch (\Exception $e) {
+				freepbx_log(FPBX_LOG_ERROR, 'oryk_devices: unable to delete user ' . $old . ': ' . $e->getMessage());
+			}
+		}
+
+		// After the old extension is gone, so User Manager is not left
+		// unassigning the extension it has just been pointed at
+		$this->moveUsermanUser($account, $old, $new, $displayname, $tech, $email);
+
+		// Handsets and softphones registered against the old extension follow it
+		$this->repointDevices($old, $new);
+
+		return true;
+	}
+
+	/**
+	 * Carry a User Manager account over to a new extension.
+	 *
+	 * The account is updated rather than replaced, so its password, groups,
+	 * UCP settings and login history survive the renumbering. An account
+	 * named after the old extension is this module's own and is renamed with
+	 * it; one that merely has the extension assigned belongs to a person, so
+	 * only the assignment follows.
+	 *
+	 * @param array<string, mixed>|null $account     Account on the old number.
+	 * @param int|string                $old         Number being left behind.
+	 * @param int|string                $new         Number being moved to.
+	 * @param string                    $displayname Display name to store.
+	 * @param string                    $tech        Device technology.
+	 * @param string|null               $email       Email address for the account.
+	 *
+	 * @return bool True when an account is on the new number afterwards.
+	 */
+	public function moveUsermanUser($account, $old, $new, $displayname, $tech = 'pjsip', $email = null)
+	{
+		if (!$this->FreePBX->Modules->checkStatus('userman')) {
+			return false;
+		}
+
+		// Nothing to carry over: the new number gets a fresh account
+		if (empty($account['id'])) {
+			$this->ensureUsermanUser($new, $displayname, $tech, $email);
+
+			return $this->syncUsermanUser($new, $displayname, $email);
+		}
+
+		$username = ((string) $account['username'] === (string) $old) ? (string) $new : $account['username'];
+		$extraData = ['displayname' => $displayname];
+
+		if ($email !== null) {
+			$extraData['email'] = $email;
+		}
+
+		try {
+			$status = \FreePBX::Userman()->updateUser(
+				$account['id'],
+				$account['username'],
+				$username,
+				(string) $new,
+				$account['description'] ?? null,
+				$extraData,
+				null,
+				true
+			);
+
+			if (is_array($status) && isset($status['status']) && !$status['status']) {
+				throw new \Exception(trim(strip_tags((string) ($status['message'] ?? ''))));
+			}
+		} catch (\Exception $e) {
+			freepbx_log(FPBX_LOG_ERROR, 'oryk_devices: unable to move userman user ' . $old . ' to ' . $new . ': ' . $e->getMessage());
+
+			return false;
+		}
+
+		return true;
+	}
+
+	/**
+	 * Move a mailbox from one extension to another.
+	 *
+	 * Voicemail boxes live in voicemail.conf rather than the database, so the
+	 * entry is rewritten under the new number and the messages on disk are
+	 * moved with it. Extensions without a mailbox are skipped.
+	 *
+	 * @param int|string $old Number being left behind.
+	 * @param int|string $new Number being moved to.
+	 *
+	 * @return string|false The voicemail context, or false when nothing moved.
+	 */
+	public function moveVoicemailBox($old, $new)
+	{
+		if (!$this->FreePBX->Modules->checkStatus('voicemail')) {
+			return false;
+		}
+
+		try {
+			$voicemail = \FreePBX::Voicemail();
+			$vmconf = $voicemail->getVoicemail();
+			$context = null;
+
+			foreach ($vmconf as $name => $boxes) {
+				if (is_array($boxes) && isset($boxes[$old]) && is_array($boxes[$old])) {
+					$context = $name;
+
+					break;
+				}
+			}
+
+			// No mailbox, or the new number already has one of its own
+			if ($context === null || isset($vmconf[$context][$new])) {
+				return false;
+			}
+
+			$vmconf[$context][$new] = $vmconf[$context][$old];
+
+			unset($vmconf[$context][$old]);
+
+			$voicemail->saveVoicemail($vmconf);
+
+			// The messages themselves are stored under the old number
+			$spool = \FreePBX::Config()->get('ASTSPOOLDIR') . '/voicemail/' . $context;
+
+			if (is_dir($spool . '/' . $old) && !file_exists($spool . '/' . $new)) {
+				@rename($spool . '/' . $old, $spool . '/' . $new);
+			}
+		} catch (\Exception $e) {
+			freepbx_log(FPBX_LOG_ERROR, 'oryk_devices: unable to move the mailbox from ' . $old . ' to ' . $new . ': ' . $e->getMessage());
+
+			return false;
+		}
+
+		return $context;
+	}
+
+	/**
+	 * Point every device registered against one extension at another.
+	 *
+	 * Handsets and softphones carry the extension they belong to, so they
+	 * have to follow it when an Extension/User device is renumbered.
+	 *
+	 * @param int|string $old Number being left behind.
+	 * @param int|string $new Number being moved to.
+	 *
+	 * @return int How many devices were moved.
+	 */
+	private function repointDevices($old, $new)
+	{
+		$sth = $this->db->prepare('SELECT id FROM devices WHERE user = ? AND id != ?');
+		$sth->execute([$old, $new]);
+		$ids = $sth->fetchAll(PDO::FETCH_COLUMN);
+
+		if (!$ids) {
+			return 0;
+		}
+
+		$update = $this->db->prepare('UPDATE devices SET user = ? WHERE id = ?');
+		$connected = $this->astman && $this->astman->connected();
+
+		foreach ($ids as $device) {
+			$update->execute([$new, $device]);
+
+			if ($connected) {
+				$this->astman->database_put('DEVICE', $device . '/user', $new);
+				$this->astman->database_put('DEVICE', $device . '/default_user', $new);
+			}
+		}
+
+		if ($connected) {
+			$linked = explode('&', (string) $this->astman->database_get('AMPUSER', $new . '/device'));
+			$linked = array_unique(array_filter(array_merge($linked, $ids), 'strlen'));
+
+			$this->astman->database_put('AMPUSER', $new . '/device', implode('&', $linked));
+		}
+
+		return count($ids);
 	}
 
 	/**
@@ -515,18 +921,12 @@ class Oryk_devices extends FreePBX_Helpers implements \BMO
 			return false;
 		}
 
+		if ($this->findUsermanUser($extension)) {
+			return true;
+		}
+
 		try {
 			$userman = \FreePBX::Userman();
-
-			$existing = $userman->getUserByUsername($extension);
-
-			if (empty($existing['id'])) {
-				$existing = $userman->getUserByDefaultExtension($extension);
-			}
-
-			if (!empty($existing['id'])) {
-				return true;
-			}
 
 			$userman->processQuickCreate($tech, $extension, [
 				'um' => 'yes',
@@ -566,11 +966,7 @@ class Oryk_devices extends FreePBX_Helpers implements \BMO
 
 		try {
 			$userman = \FreePBX::Userman();
-			$user = $userman->getUserByUsername($extension);
-
-			if (empty($user['id'])) {
-				$user = $userman->getUserByDefaultExtension($extension);
-			}
+			$user = $this->findUsermanUser($extension);
 
 			// Never rename an account a person linked to this extension by hand
 			if (empty($user['id']) || (string) $user['username'] !== (string) $extension) {
@@ -680,11 +1076,7 @@ class Oryk_devices extends FreePBX_Helpers implements \BMO
 
 		try {
 			$userman = \FreePBX::Userman();
-			$user = $userman->getUserByUsername($extension);
-
-			if (empty($user['id'])) {
-				$user = $userman->getUserByDefaultExtension($extension);
-			}
+			$user = $this->findUsermanUser($extension);
 
 			if (empty($user['id']) || (string) $user['username'] !== (string) $extension) {
 				return false;
@@ -755,27 +1147,42 @@ class Oryk_devices extends FreePBX_Helpers implements \BMO
 	 */
 	public function store($sets)
 	{
-		$id = $_REQUEST['DEVICE_ID'] ?? null;
-		$user = $_REQUEST['DEVICE_USER'] ?? null;
+		$id = trim((string) ($_REQUEST['DEVICE_ID'] ?? ''));
+		$requested = trim((string) ($_REQUEST['DEVICE_USER'] ?? ''));
 		$email = $_REQUEST['DEVICE_EMAIL'] ?? null;
 		$deviceType = $_REQUEST['DEVICE_KIND'] ?? 'pjsip';
 		$type = $this->types[$deviceType] ?? $this->types['pjsip'];
 		$tech = $type['tech'] ?? 'pjsip';
-		$match = \FreePBX::Core()->getDevice($id);
+		$ownsUser = !empty($type['creates_user']);
+		$match = $id === '' ? [] : \FreePBX::Core()->getDevice($id);
 		$device = isset($match['id']) ? $match : null;
 		$flags = 0;
-		//$gid = (round(microtime(true) * 1000)); // Generate temporary ID
-		$gid = $this->generateNumber();
-		$uid = $id ? $id : $gid;
 
-		// An Extension/User device is its own user, whatever the form supplied.
-		if (!empty($type['creates_user'])) {
+		if ($ownsUser) {
+			// An Extension/User device is its own user, so the number typed
+			// into the form is the device id as well: a blank field asks for
+			// a generated one, a filled one has to be free.
+			$uid = $requested === ''
+				? $this->generateNumber()
+				: $this->assertNumberAvailable($requested, $id);
+
 			$user = $uid;
+		} else {
+			$uid = $id === '' ? $this->generateNumber() : $id;
+			$user = $requested;
 		}
 
 		$description = $_REQUEST['DEVICE_DESCRIPTION'] ?? null;
 
 		$_REQUEST['DEVICE_DESCRIPTION'] = $description ? $description : $uid;
+
+		// A changed number takes the extension, the User Manager account, the
+		// mailbox and any handset pointed at it along to the new number
+		if ($ownsUser && $device && (string) $device['id'] !== (string) $uid) {
+			$this->renumber($device['id'], $uid, $_REQUEST['DEVICE_DESCRIPTION'], $tech, $email);
+
+			$device = null; // the row on the old number is gone
+		}
 
 		$generated = \FreePBX::Core()->generateDefaultDeviceSettings(
 			$tech === 'pjsip' ? 'pjsip' : 'custom',
@@ -785,7 +1192,7 @@ class Oryk_devices extends FreePBX_Helpers implements \BMO
 		);
 
 		$defaults = \FreePBX::Core()->getDriver($tech)->getDefaultDeviceSettings(
-			$id,
+			$uid,
 			$_REQUEST['DEVICE_DESCRIPTION'],
 			$flags
 		);
@@ -828,7 +1235,7 @@ class Oryk_devices extends FreePBX_Helpers implements \BMO
 		//die(json_encode($generated));
 
 		// Make sure the matching user exists and owns this device
-		if (!empty($type['creates_user'])) {
+		if ($ownsUser) {
 			$generated['user']['value'] = "$uid";
 			$this->ensureUser($uid, $_REQUEST['DEVICE_DESCRIPTION']);
 			$this->ensureUsermanUser($uid, $_REQUEST['DEVICE_DESCRIPTION'], $tech, $email);
@@ -861,19 +1268,28 @@ class Oryk_devices extends FreePBX_Helpers implements \BMO
 	/**
 	 * Load a device and map its values to the configured fields.
 	 *
-	 * @param int|string|null $id Device identifier.
+	 * @param int|string|null                 $id     Device identifier.
+	 * @param array<string, mixed>|null       $values Submitted values that
+	 *                                                override what is stored.
 	 *
 	 * @return array<string, mixed> Device data grouped by field group.
 	 */
-	public function pull($id)
+	public function pull($id, $values = null)
 	{
 		$base = [
 			'id' => $id ?? null,
 		];
 
-		$match = \FreePBX::Core()->getDevice($id);
+		$match = ($id === null || $id === '') ? [] : \FreePBX::Core()->getDevice($id);
 		$device = isset($match['id']) ? $match : null;
-		$type = $this->types[$device['kind'] ?? $device['tech'] ?? ''] ?? null;
+		$kind = $device['kind'] ?? $device['tech'] ?? '';
+
+		// A redrawn form follows the kind that was submitted, not the stored one
+		if (is_array($values) && isset($values['DEVICE_KIND'])) {
+			$kind = $values['DEVICE_KIND'];
+		}
+
+		$type = $this->types[$kind] ?? null;
 		$keys = array_merge(
 			[
 				'DEVICE_ID',
@@ -900,6 +1316,11 @@ class Oryk_devices extends FreePBX_Helpers implements \BMO
 				$obj['value'] = $device[$obj['alias']];
 			} else if (isset($obj['name']) && isset($device[$obj['name']])) {
 				$obj['value'] = $device[$obj['name']];
+			}
+
+			// Anything the form sent back wins over the stored value
+			if (is_array($values) && array_key_exists($key, $values)) {
+				$obj['value'] = $values[$key];
 			}
 
 			$base[$obj['group'] ?? 'other'][$key] = $obj;
@@ -1082,6 +1503,13 @@ class Oryk_devices extends FreePBX_Helpers implements \BMO
 	{
 		$action = isset($_REQUEST['action']) ? $_REQUEST['action'] : 'list';
 		$id = isset($_REQUEST['id']) ? (int) $_REQUEST['id'] : '';
+		$buttons = array();
+
+		// A rejected save redraws the form, so it keeps the same buttons
+		if ($action === 'setkey') {
+			$action = 'view';
+			$id = isset($_REQUEST['DEVICE_ID']) ? (int) $_REQUEST['DEVICE_ID'] : '';
+		}
 
 		switch ($action) {
 			case 'list':

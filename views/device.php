@@ -23,6 +23,15 @@
 >
 	<input type="hidden" name="action" value="setkey">
 
+	<?php if (!empty($error)): ?>
+		<div class="p15">
+			<div class="alert alert-danger" role="alert">
+				<i class="fa fa-exclamation-circle"></i>
+				<?= htmlspecialchars((string) $error) ?>
+			</div>
+		</div>
+	<?php endif; ?>
+
 	<?php foreach ($file ?? [] as $key => $fields): ?>
 		<?php if ($groups[$key] ?? null): ?>
 			<div class="fpbx-container p15">
