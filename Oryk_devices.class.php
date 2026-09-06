@@ -8,6 +8,7 @@ use BMO;
 use PDO;
 use FreePBX_Helpers;
 use FreePBX\Modules\Oryk_Devices\CdrHistory;
+use FreePBX\Modules\Oryk_Devices\DeviceSchema;
 use FreePBX\Modules\Oryk_Devices\ExtensionManager;
 use FreePBX\Modules\Oryk_Devices\ExtensionRenumberer;
 use FreePBX\Modules\Oryk_Devices\NumberAllocator;
@@ -130,190 +131,11 @@ class Oryk_devices extends FreePBX_Helpers implements \BMO
 	private $renumberer;
 
 	/**
-	 * Supported device types and their configuration definitions.
+	 * What a device is, as a form.
 	 *
-	 * @var array<string, array<string, mixed>>
+	 * @var DeviceSchema
 	 */
-	public $types = [
-		'pjsip' => [
-			'title' => 'Extension/User',
-			'icon' => 'fa-phone',
-			'suffix' => '',
-			'tech' => 'pjsip',
-			// The device is the extension: a user with the same id is created and linked.
-			'creates_user' => true,
-			'fields' => ['DEVICE_USER', 'DEVICE_EMAIL', 'HEADER_CREDENTIALS', 'DEVICE_ACCOUNT', 'DEVICE_SECRET'],
-			// Driver settings forced on every save, whatever the form sent
-			'settings' => [
-				'media_encryption' => 'sdes',
-				'media_encryption_optimistic' => 'yes',
-			],
-		],
-		'handset' => [
-			'title' => 'Handset',
-			'icon' => 'fa-phone',
-			'suffix' => '001',
-			'tech' => 'pjsip',
-			'fields' => ['DEVICE_USER', 'HEADER_CREDENTIALS', 'DEVICE_ACCOUNT', 'DEVICE_SECRET', 'DEVICE_LINK', 'DEVICE_MANUFACTURER', 'DEVICE_MODEL'],
-		],
-		'softphone' => [
-			'title' => 'Softphone',
-			'icon' => 'fa-phone',
-			'suffix' => '002',
-			'tech' => 'pjsip',
-			'fields' => ['DEVICE_USER', 'HEADER_CREDENTIALS', 'DEVICE_ACCOUNT', 'DEVICE_SECRET'],
-		],
-		'rtsp' => [
-			'title' => 'RTSP Feed',
-			'icon' => 'fa-video',
-			'suffix' => '',
-			'tech' => 'rtsp',
-			'fields' => ['HEADER_STREAM', 'DEVICE_STREAM_IN'],
-			'actions' => [
-				'restart' => [
-					'title' => 'Restart',
-					'icon' => 'fa-redo',
-				],
-			]
-		],
-	];
-
-	/**
-	 * Available field groups.
-	 *
-	 * @var array<string, array<string, string>>
-	 */
-	public $groups = [
-		'basics' => [
-			'title' => 'Basics',
-		],
-		'authentication' => [
-			'title' => 'Authentication',
-		],
-		'location' => [
-			'title' => 'Location',
-		],
-		'make' => [
-			'title' => 'Make',
-		],
-	];
-
-	/**
-	 * Device field definitions.
-	 *
-	 * @var array<string, array<string, mixed>>
-	 */
-	public $fields = [
-		'HEADER_CREDENTIALS' => [
-			'html' => '<h2>Credentials</h2>',
-			'group' => 'authentication',
-		],
-		'HEADER_LOCATION' => [
-			'html' => '<h2>Location</h2>',
-			'group' => 'location',
-		],
-		'HEADER_STREAM' => [
-			'html' => '<h2>Stream</h2>',
-			'group' => 'location',
-		],
-		'HEADER_MAKE' => [
-			'html' => '<h2>Make</h2>',
-			'group' => 'make',
-		],
-		'DEVICE_ID' => [
-			'type' => 'hidden',
-			'name' => 'id',
-			'maxLength' => 15,
-			'group' => 'basics',
-		],
-		'DEVICE_DESCRIPTION' => [
-			'type' => 'text',
-			'title' => 'Description',
-			'example' => 'Desk Phone',
-			'name' => 'description',
-			//'required' => true,
-			'maxLength' => 255,
-			'group' => 'basics',
-		],
-		'DEVICE_EMAIL' => [
-			'type' => 'email',
-			'title' => 'Email',
-			'example' => 'user@example.com',
-			'name' => 'email',
-			'maxLength' => 255,
-			'group' => 'basics',
-			'help' => 'Used for the User Manager account and its welcome email.',
-		],
-		'DEVICE_KIND' => [
-			'type' => 'select',
-			'disabled' => false,
-			'title' => 'Kind',
-			'name' => 'kind',
-			'maxLength' => 255,
-			'group' => 'basics',
-		],
-		'DEVICE_ACCOUNT' => [
-			'type' => 'span',
-			'title' => 'Account',
-			'name' => 'account',
-			'maxLength' => 255,
-			'group' => 'authentication',
-			//'disabled' => true,
-		],
-		'DEVICE_SECRET' => [
-			'type' => 'password',
-			'title' => 'Secret',
-			'name' => 'secret',
-			'maxLength' => 255,
-			'group' => 'authentication',
-		],
-		'DEVICE_USER' => [
-			'type' => 'text',
-			'title' => 'Extension/User',
-			'example' => '1001',
-			'name' => 'user',
-			'maxLength' => 10,
-			'group' => 'location',
-		],
-		'DEVICE_STREAM_IN' => [
-			'type' => 'text',
-			'title' => 'In',
-			'example' => 'rtsp://',
-			'name' => 'stream_in',
-			'maxLength' => 255,
-			'group' => 'location',
-		],
-		'DEVICE_STREAM_OUT' => [
-			'type' => 'text',
-			'title' => 'Out',
-			'example' => 'rtmp://',
-			'name' => 'stream_out',
-			'maxLength' => 255,
-			'group' => 'location',
-		],
-		'DEVICE_LINK' => [
-			'type' => 'url',
-			'title' => 'Link',
-			'example' => 'http(s)://',
-			'name' => 'link',
-			'maxLength' => 255,
-			'group' => 'location',
-		],
-		'DEVICE_MANUFACTURER' => [
-			'type' => 'text',
-			'title' => 'Manufacturer',
-			'name' => 'manufacturer',
-			'maxLength' => 255,
-			'group' => 'make',
-		],
-		'DEVICE_MODEL' => [
-			'type' => 'text',
-			'title' => 'Model',
-			'name' => 'model',
-			'maxLength' => 255,
-			'group' => 'make',
-		],
-	];
+	private $schema;
 
 	/**
 	 * Create an Oryk devices module instance.
@@ -332,6 +154,7 @@ class Oryk_devices extends FreePBX_Helpers implements \BMO
 		$this->db = $freepbx->Database;
 		$this->astman = $freepbx->astman;
 
+		$this->schema = new DeviceSchema($freepbx);
 		$this->voicemail = new VoicemailManager($freepbx);
 		$this->cdr = new CdrHistory($freepbx, $this->voicemail);
 		$this->userman = new UsermanManager($freepbx);
@@ -398,15 +221,15 @@ class Oryk_devices extends FreePBX_Helpers implements \BMO
 			case 'list':
 
 				return load_view(__DIR__ . '/views/devices.php', [
-					'types' => $this->types,
+					'types' => $this->schema->types,
 				]);
 
 			case 'view':
 
 				return load_view(__DIR__ . '/views/device.php', [
-					'types' => $this->types,
-					'groups' => $this->groups,
-					'file' => $this->pull($_REQUEST['id'] ?? null),
+					'types' => $this->schema->types,
+					'groups' => $this->schema->groups,
+					'file' => $this->schema->buildFormData($_REQUEST['id'] ?? null),
 				]);
 
 			case 'del':
@@ -426,13 +249,13 @@ class Oryk_devices extends FreePBX_Helpers implements \BMO
 				$submitted = $_REQUEST;
 
 				try {
-					$id = $this->store($this->fields);
+					$id = $this->store($this->schema->fields);
 				} catch (\Exception $e) {
 					// Nothing was written: redraw the form with what was typed
 					return load_view(__DIR__ . '/views/device.php', [
-						'types' => $this->types,
-						'groups' => $this->groups,
-						'file' => $this->pull($submitted['DEVICE_ID'] ?? null, $submitted),
+						'types' => $this->schema->types,
+						'groups' => $this->schema->groups,
+						'file' => $this->schema->buildFormData($submitted['DEVICE_ID'] ?? null, $submitted),
 						'error' => $e->getMessage(),
 					]);
 				}
@@ -476,6 +299,22 @@ class Oryk_devices extends FreePBX_Helpers implements \BMO
 	public function syncVoicemailEmail($extension, $email)
 	{
 		return $this->voicemail->syncEmail($extension, $email);
+	}
+
+	/**
+	 * Load a device and map its values to the configured fields.
+	 *
+	 * @deprecated Use $this->schema->buildFormData() instead.
+	 *
+	 * @param int|string|null           $id     Device identifier.
+	 * @param array<string, mixed>|null $values Submitted values that
+	 *                                          override what is stored.
+	 *
+	 * @return array<string, mixed> Device data grouped by field group.
+	 */
+	public function pull($id, $values = null)
+	{
+		return $this->schema->buildFormData($id, $values);
 	}
 
 	/**
@@ -742,7 +581,7 @@ class Oryk_devices extends FreePBX_Helpers implements \BMO
 		}
 
 		$kind = $device['kind'] ?? $device['tech'] ?? '';
-		$type = $this->types[$kind] ?? null;
+		$type = $this->schema->types[$kind] ?? null;
 		$user = $device['user'] ?? null;
 
 		\FreePBX::Core()->delDevice($device['id']);
@@ -796,7 +635,7 @@ class Oryk_devices extends FreePBX_Helpers implements \BMO
 		$requested = trim((string) ($_REQUEST['DEVICE_USER'] ?? ''));
 		$email = $_REQUEST['DEVICE_EMAIL'] ?? null;
 		$deviceType = $_REQUEST['DEVICE_KIND'] ?? 'pjsip';
-		$type = $this->types[$deviceType] ?? $this->types['pjsip'];
+		$type = $this->schema->types[$deviceType] ?? $this->schema->types['pjsip'];
 		$tech = $type['tech'] ?? 'pjsip';
 		$ownsUser = !empty($type['creates_user']);
 		$match = $id === '' ? [] : \FreePBX::Core()->getDevice($id);
@@ -919,72 +758,6 @@ class Oryk_devices extends FreePBX_Helpers implements \BMO
 		}
 
 		return $uid;
-	}
-
-	/**
-	 * Load a device and map its values to the configured fields.
-	 *
-	 * @param int|string|null                 $id     Device identifier.
-	 * @param array<string, mixed>|null       $values Submitted values that
-	 *                                                override what is stored.
-	 *
-	 * @return array<string, mixed> Device data grouped by field group.
-	 */
-	public function pull($id, $values = null)
-	{
-		$base = [
-			'id' => $id ?? null,
-		];
-
-		$match = ($id === null || $id === '') ? [] : \FreePBX::Core()->getDevice($id);
-		$device = isset($match['id']) ? $match : null;
-		$kind = $device['kind'] ?? $device['tech'] ?? '';
-
-		// A redrawn form follows the kind that was submitted, not the stored one
-		if (is_array($values) && isset($values['DEVICE_KIND'])) {
-			$kind = $values['DEVICE_KIND'];
-		}
-
-		$type = $this->types[$kind] ?? null;
-		$keys = array_merge(
-			[
-				'DEVICE_ID',
-				'DEVICE_DESCRIPTION',
-				'DEVICE_KIND',
-			],
-			($type['fields'] ?? []),
-		);
-
-		foreach ($keys as $key) {
-			$obj = $this->fields[$key] ?? null;
-
-			if (!$obj) {
-				continue;
-			}
-
-			if ($key == 'DEVICE_KIND') {
-				$obj['type'] = 'select';
-				$obj['options'] = $this->types;
-			}
-
-			// Get value from alias or name
-			if (isset($obj['alias']) && isset($device[$obj['alias']])) {
-				$obj['value'] = $device[$obj['alias']];
-			} else if (isset($obj['name']) && isset($device[$obj['name']])) {
-				$obj['value'] = $device[$obj['name']];
-			}
-
-			// Anything the form sent back wins over the stored value
-			if (is_array($values) && array_key_exists($key, $values)) {
-				$obj['value'] = $values[$key];
-			}
-
-			$base[$obj['group'] ?? 'other'][$key] = $obj;
-		}
-
-		$base['type'] = $device['type'] ?? null;
-
-		return $base;
 	}
 
 	/**
