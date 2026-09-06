@@ -38,23 +38,23 @@ Clone the repository into the FreePBX modules directory:
 
 ```bash
 cd /var/www/html/admin/modules
-git clone https://github.com/alainmenag/freepbx-oryk-devices.git oryk_devices
+git clone https://github.com/alainmenag/freepbx-oryk-devices.git oryk_connect
 ```
 
 Set the expected FreePBX ownership and install the module:
 
 ```bash
 fwconsole chown
-fwconsole ma install oryk_devices
+fwconsole ma install oryk_connect
 fwconsole reload
 ```
 
 To update an existing installation:
 
 ```bash
-cd /var/www/html/admin/modules/oryk_devices
+cd /var/www/html/admin/modules/oryk_connect
 git pull
-fwconsole ma upgrade oryk_devices
+fwconsole ma upgrade oryk_connect
 fwconsole chown
 fwconsole reload
 ```
@@ -230,8 +230,8 @@ When a new record does not have an ID, the module generates a 10-digit identifie
 ## Project structure
 
 ```text
-Oryk_devices.class.php   Main BMO class, device definitions, CRUD, and AJAX handlers
-page.oryk_devices.php    FreePBX page entry point
+Oryk_Connect.class.php   Main BMO class, device definitions, CRUD, and AJAX handlers
+page.oryk_connect.php    FreePBX page entry point
 functions.inc.php        FreePBX module hook placeholder
 install.php              Legacy installation entry point
 module.xml               Module metadata and FreePBX dependencies
@@ -268,9 +268,9 @@ assets/css/
 
 ## Runtime flow
 
-`page.oryk_devices.php` obtains the `Oryk_devices` BMO instance and calls `showPage()`.
+`page.oryk_connect.php` obtains the `Oryk_Connect` BMO instance and calls `showPage()`.
 
-`Oryk_devices` is the FreePBX side and nothing else. It registers the RTSP
+`Oryk_Connect` is the FreePBX side and nothing else. It registers the RTSP
 driver, routes the request, hands the submitted form to the right subsystem,
 and answers the AJAX the device list makes. It reads `$_REQUEST`; nothing
 under `src/` does.
@@ -291,13 +291,13 @@ The work itself is delegated:
 The device list in `views/devices.php` uses FreePBX's Bootstrap Table integration to request rows from:
 
 ```text
-ajax.php?module=oryk_devices&command=list
+ajax.php?module=oryk_connect&command=list
 ```
 
 RTSP restart actions use:
 
 ```text
-ajax.php?module=oryk_devices&command=restart
+ajax.php?module=oryk_connect&command=restart
 ```
 
 ## RTSP and MediaMTX behavior
@@ -337,7 +337,7 @@ This is a FreePBX module rather than a standalone PHP application.
 Place or symlink the repository at:
 
 ```text
-/var/www/html/admin/modules/oryk_devices
+/var/www/html/admin/modules/oryk_connect
 ```
 
 After modifying PHP files or module metadata, run:
@@ -350,16 +350,16 @@ fwconsole reload
 After changing the module version or installation behavior, update `version` and `dbversion` in `module.xml`, then run:
 
 ```bash
-fwconsole ma upgrade oryk_devices
+fwconsole ma upgrade oryk_connect
 fwconsole reload
 ```
 
 ### Subsystems
 
 Anything under `src/` is loaded by a small autoloader registered at the top
-of `Oryk_devices.class.php`, since BMO autoloads only the module class
+of `Oryk_Connect.class.php`, since BMO autoloads only the module class
 itself. A new class goes in `src/`, in the
-`FreePBX\Modules\Oryk_Devices` namespace, named after its file, and needs
+`FreePBX\Modules\Oryk_Connect` namespace, named after its file, and needs
 no registration anywhere.
 
 The RTSP driver is deliberately left out of that loader. It is required
@@ -382,7 +382,7 @@ meant to be handed, without touching the caller's copy of the form.
 
 One of the checks is lexical rather than behavioural: every global class
 named inside `src/` has to be qualified or imported, because unqualified it
-resolves inside `FreePBX\Modules\Oryk_Devices`, and the file then fatals --
+resolves inside `FreePBX\Modules\Oryk_Connect`, and the file then fatals --
 but only on the line that runs it, which may be a path no page opens until
 somebody deletes a device.
 

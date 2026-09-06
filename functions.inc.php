@@ -1,12 +1,12 @@
 <?php
 // functions.inc.php
 
-if (!function_exists('Oryk_devices_configpageinit'))
+if (!function_exists('Oryk_Connect_configpageinit'))
 {
-	function Oryk_devices_configpageinit($page)
+	function Oryk_Connect_configpageinit($page)
 	{
 		// $freepbx = \FreePBX::create();
-		// $oryk = $freepbx->oryk_devices;
+		// $oryk = $freepbx->oryk_connect;
 
 		// $user = $oryk->getUser();
 	}

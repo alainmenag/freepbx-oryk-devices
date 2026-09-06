@@ -2,7 +2,7 @@
 
 // src/NumberAllocator.php
 
-namespace FreePBX\Modules\Oryk_Devices;
+namespace FreePBX\Modules\Oryk_Connect;
 
 /**
  * Which numbers are free, and what the next one is.

@@ -2,7 +2,7 @@
 
 // src/CdrHistory.php
 
-namespace FreePBX\Modules\Oryk_Devices;
+namespace FreePBX\Modules\Oryk_Connect;
 
 /**
  * The call history belonging to an extension.

@@ -2,7 +2,7 @@
 
 // src/Service.php
 
-namespace FreePBX\Modules\Oryk_Devices;
+namespace FreePBX\Modules\Oryk_Connect;
 
 /**
  * What every part of this module is given when it is built.
@@ -23,7 +23,7 @@ abstract class Service
 	/**
 	 * How every line this module logs begins.
 	 */
-	const LOG_PREFIX = 'oryk_devices: ';
+	const LOG_PREFIX = 'oryk_connect: ';
 
 	/**
 	 * FreePBX application instance.

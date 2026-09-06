@@ -351,7 +351,7 @@ class FreePBX
 
 // The same loader the module registers, pointed at this checkout
 spl_autoload_register(function ($class) {
-	$prefix = 'FreePBX\\Modules\\Oryk_Devices\\';
+	$prefix = 'FreePBX\\Modules\\Oryk_Connect\\';
 
 	if (strpos($class, $prefix) !== 0) {
 		return;

@@ -2,7 +2,7 @@
 
 // src/VoicemailManager.php
 
-namespace FreePBX\Modules\Oryk_Devices;
+namespace FreePBX\Modules\Oryk_Connect;
 
 /**
  * The mailbox side of an extension.

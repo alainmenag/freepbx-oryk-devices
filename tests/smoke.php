@@ -15,15 +15,15 @@
 require_once __DIR__ . '/stubs.php';
 require_once __DIR__ . '/namespacing.php';
 
-use FreePBX\Modules\Oryk_Devices\CdrHistory;
-use FreePBX\Modules\Oryk_Devices\DeviceManager;
-use FreePBX\Modules\Oryk_Devices\DeviceSchema;
-use FreePBX\Modules\Oryk_Devices\ExtensionManager;
-use FreePBX\Modules\Oryk_Devices\ExtensionRenumberer;
-use FreePBX\Modules\Oryk_Devices\NumberAllocator;
-use FreePBX\Modules\Oryk_Devices\UcpAssignments;
-use FreePBX\Modules\Oryk_Devices\UsermanManager;
-use FreePBX\Modules\Oryk_Devices\VoicemailManager;
+use FreePBX\Modules\Oryk_Connect\CdrHistory;
+use FreePBX\Modules\Oryk_Connect\DeviceManager;
+use FreePBX\Modules\Oryk_Connect\DeviceSchema;
+use FreePBX\Modules\Oryk_Connect\ExtensionManager;
+use FreePBX\Modules\Oryk_Connect\ExtensionRenumberer;
+use FreePBX\Modules\Oryk_Connect\NumberAllocator;
+use FreePBX\Modules\Oryk_Connect\UcpAssignments;
+use FreePBX\Modules\Oryk_Connect\UsermanManager;
+use FreePBX\Modules\Oryk_Connect\VoicemailManager;
 
 $passed = 0;
 $failed = 0;
@@ -77,7 +77,7 @@ foreach (['schema' => 'DeviceSchema', 'voicemail' => 'VoicemailManager',
           'ucp' => 'UcpAssignments', 'extensions' => 'ExtensionManager',
           'numbers' => 'NumberAllocator', 'renumberer' => 'ExtensionRenumberer',
           'devices' => 'DeviceManager'] as $key => $class) {
-	is_eq($class, get_class($s[$key]), 'FreePBX\Modules\Oryk_Devices\\' . $class);
+	is_eq($class, get_class($s[$key]), 'FreePBX\Modules\Oryk_Connect\\' . $class);
 }
 
 echo "\nthe schema still describes every kind of device:\n";
@@ -170,7 +170,7 @@ $LOG = [];
 is_eq('a path is refused', $s['cdr']->purge('../etc'), ['rows' => 0, 'recordings' => 0]);
 is_eq('and said so once', count($LOG), 1);
 is_eq('with the module prefix',
-	strpos($LOG[0], 'ERROR: oryk_devices: refusing to purge') === 0, true);
+	strpos($LOG[0], 'ERROR: oryk_connect: refusing to purge') === 0, true);
 is_eq('nothing is refused', $s['cdr']->purge(''), ['rows' => 0, 'recordings' => 0]);
 is_eq('a fragment of SQL is refused', $s['cdr']->purge('1001 OR 1=1'), ['rows' => 0, 'recordings' => 0]);
 is_eq('a number with a space is refused', $s['cdr']->purge('10 01'), ['rows' => 0, 'recordings' => 0]);
@@ -304,8 +304,8 @@ foreach (glob(__DIR__ . '/../src/*.php') as $file) {
 	$unqualified = array_merge($unqualified, oryk_unqualified_classes($file));
 }
 
-// PDO::FETCH_COLUMN inside namespace FreePBX\Modules\Oryk_Devices is
-// FreePBX\Modules\Oryk_Devices\PDO, which does not exist. It fatals only
+// PDO::FETCH_COLUMN inside namespace FreePBX\Modules\Oryk_Connect is
+// FreePBX\Modules\Oryk_Connect\PDO, which does not exist. It fatals only
 // when the line runs, and the line that found this one runs when somebody
 // deletes a device with call history.
 is_eq('nothing unqualified', $unqualified, []);

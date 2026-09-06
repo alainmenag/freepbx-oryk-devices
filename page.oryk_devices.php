@@ -1,2 +1,2 @@
 <?php
-echo FreePBX::Oryk_devices()->showPage();
+echo FreePBX::Oryk_Connect()->showPage();

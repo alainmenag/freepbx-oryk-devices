@@ -2,7 +2,7 @@
 
 // src/ExtensionRenumberer.php
 
-namespace FreePBX\Modules\Oryk_Devices;
+namespace FreePBX\Modules\Oryk_Connect;
 
 /**
  * Moving an Extension/User device to a different number.

@@ -1,14 +1,14 @@
-<!-- /var/www/html/admin/modules/oryk_devices/module.xml -->
+<!-- /var/www/html/admin/modules/oryk_connect/module.xml -->
 <module>
-	<rawname>oryk_devices</rawname>
+	<rawname>oryk_connect</rawname>
 	<name>Devices</name>
 	<repo>commercial</repo>
 	<version>1.3.1</version>
 	<dbversion>1.3.1</dbversion>
 	<publisher>Oryk</publisher>
 	<type>setup</type>
-	<class>Oryk_devices</class>
-	<phpclass>Oryk_devices</phpclass>
+	<class>Oryk_Connect</class>
+	<phpclass>Oryk_Connect</phpclass>
 	<canuninstall>no</canuninstall>
 	<candisable>no</candisable>
 	<license>AGPLv3</license>
@@ -30,12 +30,12 @@
 		<file>functions.inc.php</file>
 	</files>
 	<menuitems>
-		<oryk_devices category="Oryk" order="3">
+		<oryk_connect category="Oryk" order="3">
 			<![CDATA[
 				<i class="fa fa-sitemap"></i>
 				<span>Devices</span>
 			]]>
-		</oryk_devices>
+		</oryk_connect>
 	</menuitems>
 	<depends>
 		<module>core</module>
